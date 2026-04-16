@@ -8,7 +8,9 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Database ──────────────────────────────────────────────────────────
-const db = new Database(path.join(__dirname, 'data', 'jidelnicek.db'));
+const dataDir = path.join(__dirname, 'data');
+if (!require('fs').existsSync(dataDir)) require('fs').mkdirSync(dataDir, { recursive: true });
+const db = new Database(path.join(dataDir, 'jidelnicek.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
