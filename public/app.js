@@ -213,13 +213,35 @@ async function generatePlan() {
     }
 
     const data = await res.json();
-    currentPlan = { meals: data.meals };
-    renderPlan();
-    loadChat();
+    if (!data.jobId) throw new Error('No job ID returned');
+
+    // Poll for result
+    const poll = setInterval(async () => {
+      try {
+        const sr = await fetch(`/api/generate-status/${data.jobId}`);
+        const sj = await sr.json();
+        if (sj.status === 'done') {
+          clearInterval(poll);
+          currentPlan = { meals: sj.result.meals };
+          renderPlan();
+          loadChat();
+          btn.disabled = false;
+          btn.textContent = '✨ Generovat týden';
+        } else if (sj.status === 'error') {
+          clearInterval(poll);
+          throw new Error(sj.error || 'Generation failed');
+        }
+      } catch (e) {
+        clearInterval(poll);
+        alert('Chyba: ' + e.message);
+        area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + e.message + '</p></div>';
+        btn.disabled = false;
+        btn.textContent = '✨ Generovat týden';
+      }
+    }, 3000);
   } catch (err) {
     alert('Chyba: ' + err.message);
     area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + err.message + '</p></div>';
-  } finally {
     btn.disabled = false;
     btn.textContent = '✨ Generovat týden';
   }

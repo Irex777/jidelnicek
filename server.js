@@ -107,15 +107,22 @@ app.delete('/api/plans/:userId/:weekStart', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── API: Generate with AI ─────────────────────────────────────────────
+// ── API: Generate with AI (async) ─────────────────────────────────────
+const pendingJobs = {};
+
 app.post('/api/generate/:userId', async (req, res) => {
   const { week_start } = req.body;
   const user = find('users', u => u.id === parseInt(req.params.userId));
   if (!user) return res.status(404).json({ error: 'User not found' });
-  const loc = getLocale(user.locale);
-  const targetCal = user.calories_target || 2000;
+  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  pendingJobs[jobId] = { status: 'pending', result: null, error: null };
+  res.json({ jobId, status: 'pending' });
 
-  const prompt = `Jsi profesionální výživový poradce. Vytvoř týdenní jídelníček v JSON formátu.
+  // Run generation in background
+  (async () => {
+    const loc = getLocale(user.locale);
+    const targetCal = user.calories_target || 2000;
+    const prompt = `Jsi profesionální výživový poradce. Vytvoř týdenní jídelníček v JSON formátu.
 
 Uživatel: ${user.name}
 Váha: ${user.weight_current||'?'}kg → ${user.weight_goal||'?'}kg, výška: ${user.height||'?'}cm, věk: ${user.age||'?'}, ${user.sex==='male'?'muž':user.sex==='female'?'žena':'?'}
@@ -126,23 +133,30 @@ Vrať POUZE valid JSON bez markdown:
 {"days":[{"day":"${loc.dayNames[0]}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep":"stručný postup"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}...7 days]}
 
 Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
+    try {
+      const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 6000 });
+      let content = completion.choices[0].message.content.trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
+      const plan = JSON.parse(content);
+      const meals = {};
+      plan.days.forEach((day, i) => { meals[i] = { day: day.day, total_calories: day.total_calories, total_protein: day.total_protein, total_carbs: day.total_carbs, total_fat: day.total_fat, meals: day.meals }; });
 
-  try {
-    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 6000, stream: false });
-    let content = completion.choices[0].message.content.trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
-    const plan = JSON.parse(content);
-    const meals = {};
-    plan.days.forEach((day, i) => { meals[i] = { day: day.day, total_calories: day.total_calories, total_protein: day.total_protein, total_carbs: day.total_carbs, total_fat: day.total_fat, meals: day.meals }; });
+      const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
+      if (existing) { updateOne('meal_plans', p => p.id === existing.id, { meals, updated_at: new Date().toISOString() }); }
+      else { push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); }
+      push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
+      pendingJobs[jobId] = { status: 'done', result: { meals } };
+    } catch (err) {
+      console.error('AI error:', err);
+      pendingJobs[jobId] = { status: 'error', error: err.message };
+    }
+  })();
+});
 
-    const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-    if (existing) { updateOne('meal_plans', p => p.id === existing.id, { meals, updated_at: new Date().toISOString() }); }
-    else { push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); }
-    push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
-    res.json({ meals });
-  } catch (err) {
-    console.error('AI error:', err);
-    res.status(500).json({ error: 'Generation failed', details: err.message });
-  }
+app.get('/api/generate-status/:jobId', (req, res) => {
+  const job = pendingJobs[req.params.jobId];
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+  if (job.status !== 'pending') delete pendingJobs[req.params.jobId];
 });
 
 // ── API: Chat ─────────────────────────────────────────────────────────
