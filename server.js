@@ -32,7 +32,7 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 // ── AI Client ─────────────────────────────────────────────────────────
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
-  baseURL: process.env.AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
+  baseURL: process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4',
 });
 const AI_MODEL = process.env.AI_MODEL || 'glm-5.1';
 
