@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "lowdb": "^7.0.1",
     "openai": "^4.77.0"
   }
 }
