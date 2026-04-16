@@ -9,18 +9,27 @@
 </head>
 <body>
   <div class="app">
-    <!-- Sidebar -->
+    <!-- Mobile Header -->
+    <header class="mobile-header">
+      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
+      <h1>🥗 Jídelníček</h1>
+      <button class="user-btn" onclick="showUserModal()">👤</button>
+    </header>
+
+    <!-- Sidebar (overlay on mobile) -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
     <div class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <h1>🥗 Jídelníček</h1>
         <p>AI Diet Planner</p>
       </div>
       <div class="user-list" id="userList"></div>
-      <div class="btn-new-user" onclick="showUserModal()">+ Nový uživatel</div>
+      <div class="btn-new-user" onclick="showUserModal(); closeSidebar();">+ Nový uživatel</div>
     </div>
 
     <!-- Main -->
     <div class="main">
+      <!-- Week nav bar -->
       <div class="topbar">
         <div class="week-nav">
           <button onclick="changeWeek(-1)">◀</button>
@@ -28,33 +37,38 @@
           <button onclick="changeWeek(1)">▶</button>
         </div>
         <div class="topbar-actions">
-          <button class="generate" onclick="generatePlan()" id="btnGenerate">✨ Generovat týden</button>
-          <button onclick="showPrep()">📋 Příprava</button>
-          <button onclick="showShopping()">🛒 Nákup</button>
-          <button onclick="showUserModal()" id="btnProfile">👤 Profil</button>
-          <button class="danger" onclick="deletePlan()">🗑️</button>
+          <button class="btn-generate" onclick="generatePlan()" id="btnGenerate">✨ Generovat</button>
+          <button onclick="showShopping()" title="Nákupní seznam">🛒</button>
+          <button onclick="showPrep()" title="Příprava">📋</button>
+          <button onclick="deletePlan()" class="danger" title="Smazat">🗑️</button>
         </div>
       </div>
 
-      <div class="content">
-        <div class="plan-area" id="planArea">
-          <div class="empty-state" id="emptyState">
-            <div class="icon">🍽️</div>
-            <h2>Začněte vytvořením profilu</h2>
-            <p>Přidejte uživatele a vygenerujte týdenní jídelníček pomocí AI</p>
-          </div>
-        </div>
+      <!-- User strip (shows selected user info) -->
+      <div class="user-strip" id="userStrip"></div>
 
-        <div class="chat-area">
-          <div class="chat-header">
-            <div class="ai-dot"></div>
-            AI Asistent
-          </div>
+      <!-- Plan cards -->
+      <div class="plan-area" id="planArea">
+        <div class="empty-state">
+          <div class="icon">🍽️</div>
+          <h2>Začněte vytvořením profilu</h2>
+          <p>Přidejte uživatele a vygenerujte týdenní jídelníček pomocí AI</p>
+        </div>
+      </div>
+
+      <!-- Chat (bottom sheet on mobile) -->
+      <div class="chat-section">
+        <div class="chat-toggle" id="chatToggle" onclick="toggleChat()">
+          <div class="ai-dot"></div>
+          <span>AI Asistent</span>
+          <span class="chat-toggle-arrow" id="chatArrow">▲</span>
+        </div>
+        <div class="chat-body" id="chatBody">
           <div class="chat-messages" id="chatMessages">
             <div class="chat-msg system">AI asistent vám pomůže upravit jídelníček podle vašich přání</div>
           </div>
           <div class="chat-input-area">
-            <textarea id="chatInput" placeholder="Zeptej se AI na změny jídelníčku..." rows="1" onkeydown="handleChatKey(event)"></textarea>
+            <textarea id="chatInput" placeholder="Zeptej se AI na změny..." rows="1" onkeydown="handleChatKey(event)"></textarea>
             <button onclick="sendChat()">➤</button>
           </div>
         </div>
@@ -90,12 +104,12 @@
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>Aktuální váha (kg)</label>
-          <input id="fWeight" type="number" step="0.1">
+          <label>Váha (kg)</label>
+          <input id="fWeight" type="number" step="0.1" placeholder="Aktuální">
         </div>
         <div class="form-group">
-          <label>Cílová váha (kg)</label>
-          <input id="fWeightGoal" type="number" step="0.1">
+          <label>Cíl (kg)</label>
+          <input id="fWeightGoal" type="number" step="0.1" placeholder="Cílová">
         </div>
       </div>
       <div class="form-row">
@@ -120,7 +134,7 @@
       </div>
       <div class="form-group">
         <label>Diety / restrikce</label>
-        <input id="fRestrictions" placeholder="např. bezlepková, vegetariánská, alergie na ořechy...">
+        <input id="fRestrictions" placeholder="např. bezlepková, vegetariánská...">
       </div>
       <div class="modal-actions">
         <button onclick="closeUserModal()">Zrušit</button>
@@ -130,18 +144,26 @@
   </div>
 
   <!-- Shopping List -->
-  <div class="shop-overlay" id="shopOverlay" onclick="closeShopIfBg(event)">
-    <div class="shop-panel">
-      <h2>🛒 Nákupní seznam <button onclick="closeShop()">✕</button></h2>
-      <div class="shop-items" id="shopItems"></div>
+  <div class="overlay-panel" id="shopOverlay" onclick="closeShopIfBg(event)">
+    <div class="panel-sheet">
+      <div class="panel-handle"></div>
+      <div class="panel-header">
+        <h2>🛒 Nákupní seznam</h2>
+        <button onclick="closeShop()">✕</button>
+      </div>
+      <div class="panel-body" id="shopItems"></div>
     </div>
   </div>
 
   <!-- Prep Guide -->
-  <div class="prep-overlay" id="prepOverlay" onclick="closePrepIfBg(event)">
-    <div class="prep-panel">
-      <h2>📋 Příprava <button onclick="closePrep()">✕</button></h2>
-      <div class="prep-content" id="prepContent"></div>
+  <div class="overlay-panel" id="prepOverlay" onclick="closePrepIfBg(event)">
+    <div class="panel-sheet">
+      <div class="panel-handle"></div>
+      <div class="panel-header">
+        <h2>📋 Příprava</h2>
+        <button onclick="closePrep()">✕</button>
+      </div>
+      <div class="panel-body" id="prepContent"></div>
     </div>
   </div>
 

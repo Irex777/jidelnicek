@@ -4,6 +4,8 @@ let currentUser = null;
 let currentWeek = getWeekStart(new Date());
 let currentPlan = null;
 let chatBusy = false;
+let genTimer = null;
+let genSeconds = 0;
 
 // ── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -40,13 +42,34 @@ function updateWeekLabel() {
   document.getElementById('weekLabel').textContent = formatDateRange(currentWeek);
 }
 
+// ── Sidebar ──────────────────────────────────────────────────────────
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('sidebarBackdrop').classList.toggle('open');
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebarBackdrop').classList.remove('open');
+}
+
+// ── Chat toggle ──────────────────────────────────────────────────────
+function toggleChat() {
+  const body = document.getElementById('chatBody');
+  const arrow = document.getElementById('chatArrow');
+  body.classList.toggle('open');
+  arrow.textContent = body.classList.contains('open') ? '▼' : '▲';
+  if (body.classList.contains('open')) {
+    const msgs = document.getElementById('chatMessages');
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+}
+
 // ── Users ────────────────────────────────────────────────────────────
 async function loadUsers() {
   const res = await fetch('/api/users');
   users = await res.json();
   renderUsers();
   updateWeekLabel();
-  // Auto-select last user or first
   if (users.length > 0) {
     selectUser(currentUser && users.find(u => u.id === currentUser.id) ? currentUser.id : users[0].id);
   }
@@ -63,12 +86,20 @@ function renderUsers() {
       </div>
     </div>
   `).join('');
+  updateUserStrip();
+}
+
+function updateUserStrip() {
+  const strip = document.getElementById('userStrip');
+  if (!currentUser) { strip.innerHTML = ''; return; }
+  strip.innerHTML = `<span class="u-name">${currentUser.name}</span> ${currentUser.weight_current || '?'}kg → ${currentUser.weight_goal || '?'}kg · <span class="u-cal">${currentUser.calories_target || '?'} kcal</span>`;
 }
 
 async function selectUser(id) {
   currentUser = users.find(u => u.id === id);
   renderUsers();
   updateWeekLabel();
+  closeSidebar();
   await loadPlan();
   loadChat();
 }
@@ -127,13 +158,12 @@ async function loadPlan() {
   if (!currentUser) return;
   const res = await fetch(`/api/plans/${currentUser.id}/${currentWeek}`);
   const plan = await res.json();
-  currentPlan = plan;
+  currentPlan = (plan && plan.meals) ? plan : null;
   renderPlan();
 }
 
 function renderPlan() {
   const area = document.getElementById('planArea');
-  const empty = document.getElementById('emptyState');
 
   if (!currentUser) {
     area.innerHTML = '<div class="empty-state"><div class="icon">🍽️</div><h2>Začněte vytvořením profilu</h2><p>Přidejte uživatele a vygenerujte týdenní jídelníček</p></div>';
@@ -141,14 +171,13 @@ function renderPlan() {
   }
 
   if (!currentPlan) {
-    area.innerHTML = '<div class="empty-state"><div class="icon">✨</div><h2>Žádný plán pro tento týden</h2><p>Klikněte na "Generovat týden" pro vytvoření AI jídelníčku</p></div>';
+    area.innerHTML = '<div class="empty-state"><div class="icon">✨</div><h2>Žádný plán pro tento týden</h2><p>Tapněte na "Generovat" pro vytvoření AI jídelníčku</p></div>';
     return;
   }
 
   const meals = currentPlan.meals;
   if (!meals) return;
 
-  const dayNames = ['Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota', 'Neděle'];
   const mealLabels = { breakfast: 'Snídaně', morning_snack: 'Dop. svačina', lunch: 'Oběd', afternoon_snack: 'Odp. svačina', dinner: 'Večeře' };
 
   let html = '<div class="day-grid">';
@@ -160,7 +189,7 @@ function renderPlan() {
     html += `
       <div class="day-card">
         <div class="day-card-header">
-          <h3>${day.day || dayNames[i]}</h3>
+          <h3>${day.day || ''}</h3>
           <span class="day-calories">${day.total_calories || '?'} kcal</span>
         </div>
         <div class="day-macros">
@@ -174,7 +203,7 @@ function renderPlan() {
       if (!meal) continue;
 
       html += `
-        <div class="meal-item" title="${(meal.ingredients || []).join('\n')}">
+        <div class="meal-item">
           <div class="meal-type">${label}</div>
           <div class="meal-name">${meal.name}</div>
           <div class="meal-meta">${meal.calories || '?'} kcal · B:${meal.protein || '?'}g S:${meal.carbs || '?'}g T:${meal.fat || '?'}g</div>
@@ -194,11 +223,22 @@ async function generatePlan() {
   if (!currentUser) return alert('Nejdříve vyberte uživatele');
 
   const btn = document.getElementById('btnGenerate');
-  btn.disabled = true;
-  btn.textContent = '⏳ Generuji...';
-
   const area = document.getElementById('planArea');
-  area.innerHTML = '<div class="loading"><div class="spinner"></div> AI vytváří váš jídelníček...</div>';
+  btn.disabled = true;
+
+  // Show progress with timer
+  genSeconds = 0;
+  area.innerHTML = `<div class="gen-progress">
+    <div class="gen-emoji">🧠</div>
+    <div class="gen-text">AI vytváří váš jídelníček...</div>
+    <div class="gen-timer" id="genTimer">0s — prosím čekejte</div>
+  </div>`;
+
+  genTimer = setInterval(() => {
+    genSeconds++;
+    const el = document.getElementById('genTimer');
+    if (el) el.textContent = `${genSeconds}s — prosím čekejte`;
+  }, 1000);
 
   try {
     const res = await fetch(`/api/generate/${currentUser.id}`, {
@@ -208,12 +248,16 @@ async function generatePlan() {
     });
 
     if (!res.ok) {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({}));
       throw new Error(err.details || err.error || 'Generation failed');
     }
 
     const data = await res.json();
     if (!data.jobId) throw new Error('No job ID returned');
+
+    // Update progress text
+    const progText = document.querySelector('.gen-text');
+    if (progText) progText.textContent = 'AI přemýšlí nad jídelníčkem...';
 
     // Poll for result
     const poll = setInterval(async () => {
@@ -222,28 +266,32 @@ async function generatePlan() {
         const sj = await sr.json();
         if (sj.status === 'done') {
           clearInterval(poll);
+          clearInterval(genTimer);
           currentPlan = { meals: sj.result.meals };
           renderPlan();
           loadChat();
           btn.disabled = false;
-          btn.textContent = '✨ Generovat týden';
+          btn.textContent = '✨ Generovat';
         } else if (sj.status === 'error') {
           clearInterval(poll);
+          clearInterval(genTimer);
           throw new Error(sj.error || 'Generation failed');
         }
       } catch (e) {
         clearInterval(poll);
+        clearInterval(genTimer);
         alert('Chyba: ' + e.message);
-        area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + e.message + '</p></div>';
+        area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + escapeHtml(e.message) + '</p></div>';
         btn.disabled = false;
-        btn.textContent = '✨ Generovat týden';
+        btn.textContent = '✨ Generovat';
       }
     }, 3000);
   } catch (err) {
+    clearInterval(genTimer);
     alert('Chyba: ' + err.message);
-    area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + err.message + '</p></div>';
+    area.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>Chyba při generování</h2><p>' + escapeHtml(err.message) + '</p></div>';
     btn.disabled = false;
-    btn.textContent = '✨ Generovat týden';
+    btn.textContent = '✨ Generovat';
   }
 }
 
@@ -275,8 +323,12 @@ async function sendChat() {
   if (!msg) return;
 
   input.value = '';
-  autoResizeTextarea();
+  input.style.height = 'auto';
   chatBusy = true;
+
+  // Ensure chat is open
+  const body = document.getElementById('chatBody');
+  if (!body.classList.contains('open')) toggleChat();
 
   const container = document.getElementById('chatMessages');
   container.innerHTML += `<div class="chat-msg user">${escapeHtml(msg)}</div>`;
@@ -292,13 +344,11 @@ async function sendChat() {
 
     const data = await res.json();
 
-    // Remove loading
     const loading = document.getElementById('chatLoading');
     if (loading) loading.remove();
 
     container.innerHTML += `<div class="chat-msg assistant">${escapeHtml(data.message)}</div>`;
 
-    // If plan was updated, refresh
     if (data.updatedPlan) {
       currentPlan = { meals: data.updatedPlan };
       renderPlan();
@@ -308,7 +358,7 @@ async function sendChat() {
   } catch (err) {
     const loading = document.getElementById('chatLoading');
     if (loading) loading.remove();
-    container.innerHTML += `<div class="chat-msg assistant">❌ Chyba: ${err.message}</div>`;
+    container.innerHTML += `<div class="chat-msg assistant">❌ Chyba: ${escapeHtml(err.message)}</div>`;
   } finally {
     chatBusy = false;
   }
@@ -325,7 +375,7 @@ function autoResizeTextarea() {
   const ta = document.getElementById('chatInput');
   ta.addEventListener('input', () => {
     ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+    ta.style.height = Math.min(ta.scrollHeight, 80) + 'px';
   });
 }
 
@@ -350,7 +400,6 @@ async function showShopping() {
 
 function renderShoppingList(items) {
   const container = document.getElementById('shopItems');
-  // Group by category
   const groups = {};
   items.forEach((item, i) => {
     const cat = item.category || '📦 Ostatní';
