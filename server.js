@@ -128,7 +128,7 @@ Vrať POUZE valid JSON bez markdown:
 Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
 
   try {
-    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 });
+    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 6000, stream: false });
     let content = completion.choices[0].message.content.trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
     const plan = JSON.parse(content);
     const meals = {};
@@ -162,7 +162,7 @@ ${currentPlan ? 'Aktuální plán:\n'+JSON.stringify(currentPlan,null,2) : 'Žá
 Pokud měníš jídelníček, vrať JSON: {"meals":{"0":{"day":"...","total_calories":N,...,"meals":{...}},...}}. Jinak vrať text.`;
 
   try {
-    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))], temperature: 0.7, max_tokens: 8000 });
+    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))], temperature: 0.7, max_tokens: 4000, stream: false });
     let content = completion.choices[0].message.content.trim();
     let updatedPlan = null;
     if (content.includes('"meals"')) {
