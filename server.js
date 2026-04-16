@@ -30,11 +30,14 @@ function updateOne(collection, fn, updates) { const d = readDb(); const idx = d[
 function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[collection].filter((item, i) => !fn(item, i)); writeDb(d); }
 
 // ── AI Client ─────────────────────────────────────────────────────────
+const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const AI_MODEL_NAME = 'glm-5.1';
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
-  baseURL: process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4',
+  baseURL: AI_BASE_URL,
 });
-const AI_MODEL = process.env.AI_MODEL || 'glm-5.1';
+const AI_MODEL = AI_MODEL_NAME;
+console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL}`);
 
 // ── Localization ──────────────────────────────────────────────────────
 const LOCALES = {
@@ -51,6 +54,7 @@ function calcBMR(u) {
 function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
 // ── API: Users ────────────────────────────────────────────────────────
+app.get('/api/debug', (req, res) => res.json({ model: AI_MODEL, baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
 app.post('/api/users', (req, res) => {
