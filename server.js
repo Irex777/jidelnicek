@@ -34,7 +34,7 @@ const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: process.env.AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
 });
-const AI_MODEL = process.env.AI_MODEL || 'glm-4-flash';
+const AI_MODEL = process.env.AI_MODEL || 'glm-5.1';
 
 // ── Localization ──────────────────────────────────────────────────────
 const LOCALES = {
