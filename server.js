@@ -213,16 +213,29 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
   const plan = find('meal_plans', p => p.user_id === uid && p.week_start === ws);
   if (!plan) return res.json([]);
 
-  // Parse ingredient: "kuřecí prsa 200g" → {name, qty, unit}
+  // Parse ingredient: handles both "kuřecí prsa 200g" and "200g kuřecích prsou"
   const parseIng = (s) => {
-    const m = s.trim().match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|ks|ks|lžíce|lžičky|lžička|štípnutí|stroužek|ks|balení|svazek|polévková lžíce)?$/i);
+    const raw = s.trim();
+    // Try "name qty unit" format: "ovesné vločky 50g"
+    let m = raw.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|lžíce|lžičky|lžička|lžiček|štípnutí|stroužek|balení|svazek|polévková lžíce)?$/i);
     if (m) {
-      let unit = (m[3] || 'ks').toLowerCase();
-      // Normalize units
-      if (unit === 'lžíce' || unit === 'lžičky' || unit === 'lžička' || unit === 'polévková lžíce') unit = 'lžíce';
+      let unit = normalizeUnit(m[3] || 'ks');
       return { name: m[1].trim(), qty: parseFloat(m[2].replace(',','.')), unit };
     }
-    return { name: s.trim(), qty: 0, unit: '' };
+    // Try "qty unit name" format: "150g kuřecích prsou", "3 vejce", "1 lžíce medu"
+    m = raw.match(/^(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|lžíce|lžičky|lžička|lžiček|štípnutí|stroužek|balení|svazek|polévková lžíce)?\s+(.+)$/i);
+    if (m) {
+      let unit = normalizeUnit(m[2] || 'ks');
+      return { name: m[3].trim(), qty: parseFloat(m[1].replace(',','.')), unit };
+    }
+    return { name: raw, qty: 0, unit: '' };
+  };
+
+  const normalizeUnit = (u) => {
+    const l = (u || 'ks').toLowerCase();
+    if (['lžíce','lžičky','lžička','lžiček','polévková lžíce'].includes(l)) return 'lžíce';
+    if (['stroužek','stroužky'].includes(l)) return 'stroužky';
+    return l;
   };
 
   // Category mapping (Czech)
@@ -248,19 +261,41 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
 
   // Collect and merge all ingredients across all days/meals
   const merged = {};
+  // For fuzzy matching: strip adjectives and find canonical base name
+  const baseName = (n) => {
+    return n.toLowerCase()
+      .replace(/\s*\(.*?\)\s*/g, '')  // remove parenthetical notes
+      .replace(/\b(syrov[éý]|čerstv[éeý]|mražen[éeý]|grilovan[éeý]|vařen[éeý]|pečen[éeý]|celozrnn[éeý]|odtučněn[éeý]|polotučn[éeý]|libov[éeý]|hladké|na ozdobu|bez kůže|ve vlastní šťávě)\b/gi, '')
+      .replace(/\s+/g, ' ').trim();
+  };
+
   Object.values(plan.meals).forEach(day => {
     Object.values(day.meals || {}).forEach(meal => {
       (meal.ingredients || []).forEach(raw => {
         const p = parseIng(raw);
-        const key = p.name.toLowerCase();
-        if (!merged[key]) {
+        // Find best matching key
+        const bn = baseName(p.name);
+        let bestKey = null, bestScore = 0;
+        for (const existingKey of Object.keys(merged)) {
+          const eb = baseName(existingKey);
+          // Exact base match
+          if (eb === bn) { bestKey = existingKey; bestScore = 1; break; }
+          // One contains the other (substantive match)
+          if (eb.length > 3 && bn.length > 3) {
+            if (eb.includes(bn) || bn.includes(eb)) {
+              const score = Math.min(eb.length, bn.length) / Math.max(eb.length, bn.length);
+              if (score > bestScore && score > 0.5) { bestScore = score; bestKey = existingKey; }
+            }
+          }
+        }
+        if (bestKey && merged[bestKey].unit === p.unit) {
+          merged[bestKey].qty += p.qty;
+        } else if (bestKey && p.qty > 0) {
+          if (!merged[bestKey].also) merged[bestKey].also = [];
+          merged[bestKey].also.push(`${p.qty} ${p.unit}`);
+        } else {
+          const key = p.name.toLowerCase();
           merged[key] = { name: p.name, qty: p.qty, unit: p.unit, category: categorize(p.name), checked: false };
-        } else if (p.qty > 0 && merged[key].unit === p.unit) {
-          merged[key].qty += p.qty;
-        } else if (p.qty > 0) {
-          // Different units — just list both
-          if (!merged[key].also) merged[key].also = [];
-          merged[key].also.push(`${p.qty} ${p.unit}`);
         }
       });
     });
