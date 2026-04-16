@@ -382,9 +382,21 @@ app.get('*', (req, res) => {
 
 // ── Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-initDb().then(() => {
-  app.listen(PORT, '0.0.0.0', () => console.log(`Jídelníček running on :${PORT}`));
-}).catch(err => {
-  console.error('DB init failed:', err);
-  process.exit(1);
-});
+
+(async () => {
+  try {
+    await initDb();
+    console.log('DB initialized');
+  } catch (err) {
+    console.error('DB init failed:', err);
+    // Continue anyway - will use defaults
+  }
+  
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Jídelníček running on :${PORT}`);
+  });
+  
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught:', err.message);
+  });
+})();
