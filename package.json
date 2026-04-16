@@ -1,0 +1,15 @@
+{
+  "name": "jidelnicek",
+  "version": "1.0.0",
+  "description": "AI-powered weekly diet planner with GLM integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "better-sqlite3": "^11.7.0",
+    "openai": "^4.77.0"
+  }
+}
