@@ -350,12 +350,24 @@ async function showShopping() {
 
 function renderShoppingList(items) {
   const container = document.getElementById('shopItems');
-  container.innerHTML = items.map((item, i) => `
-    <div class="shop-item ${item.checked ? 'checked' : ''}">
-      <input type="checkbox" ${item.checked ? 'checked' : ''} onchange="toggleShopItem(${i})">
-      <span>${item.name}</span>
-    </div>
-  `).join('');
+  // Group by category
+  const groups = {};
+  items.forEach((item, i) => {
+    const cat = item.category || '📦 Ostatní';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push({ ...item, _idx: i });
+  });
+  let html = '';
+  for (const [cat, catItems] of Object.entries(groups)) {
+    html += `<div class="shop-category">${cat}</div>`;
+    catItems.forEach(item => {
+      html += `<div class="shop-item ${item.checked ? 'checked' : ''}">
+        <input type="checkbox" ${item.checked ? 'checked' : ''} onchange="toggleShopItem(${item._idx})">
+        <span>${item.display || item.name}</span>
+      </div>`;
+    });
+  }
+  container.innerHTML = html;
 }
 
 async function toggleShopItem(index) {

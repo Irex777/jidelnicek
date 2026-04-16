@@ -575,6 +575,19 @@ body {
   color: var(--text2);
 }
 
+.shop-category {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 10px 16px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.shop-category:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
 /* ── Prep Guide ───────────────────────────────────── */
 .prep-day {
   margin-bottom: 16px;

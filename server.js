@@ -212,9 +212,75 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
   if (existing) return res.json(existing.items);
   const plan = find('meal_plans', p => p.user_id === uid && p.week_start === ws);
   if (!plan) return res.json([]);
-  const items = {};
-  Object.values(plan.meals).forEach(day => { Object.values(day.meals||{}).forEach(meal => { (meal.ingredients||[]).forEach(ing => { const k = ing.toLowerCase().trim(); if (!items[k]) items[k] = { name: ing, checked: false }; }); }); });
-  const list = Object.values(items).sort((a,b) => a.name.localeCompare(b.name,'cs'));
+
+  // Parse ingredient: "kuřecí prsa 200g" → {name, qty, unit}
+  const parseIng = (s) => {
+    const m = s.trim().match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|ks|ks|lžíce|lžičky|lžička|štípnutí|stroužek|ks|balení|svazek|polévková lžíce)?$/i);
+    if (m) {
+      let unit = (m[3] || 'ks').toLowerCase();
+      // Normalize units
+      if (unit === 'lžíce' || unit === 'lžičky' || unit === 'lžička' || unit === 'polévková lžíce') unit = 'lžíce';
+      return { name: m[1].trim(), qty: parseFloat(m[2].replace(',','.')), unit };
+    }
+    return { name: s.trim(), qty: 0, unit: '' };
+  };
+
+  // Category mapping (Czech)
+  const categorize = (name) => {
+    const n = name.toLowerCase();
+    const cats = [
+      [/maso|kuře|krůt|vepřov|hověz|losos|tuňák|candát|treska|slanina|šunka|mleté/, '🥩 Maso a ryby'],
+      [/sýr|eidam|parmaz|cottage|lučina|tvaroh|mozzarell/, '🧀 Sýry'],
+      [/jogurt|mléko|smetana|kefír/, '🥛 Mléčné'],
+      [/vejce/, '🥚 Vejce'],
+      [/chléb|chleb|toast|knäckebrot|tortilla|polenta/, '🍞 Pečivo'],
+      [/rýže|těstovin|kuskus|quinoa|pohanka|vločky|mouka|knedlík/, '🌾 Obiloviny'],
+      [/banán|jablk|jablk|jahod|borůvk|malin|hrozn|ovoc|citrus|citrón|pomeranč/, '🍎 Ovoce'],
+      [/okurk|rajč|paprik|brokolic|špenát|cuket|salát|ředkvič|mrkev|cibul|oliv|zelí|luštěnin|fazol|hrášek|zelenin|avokád/, '🥬 Zelenina'],
+      [/protein|whey|srvát/, '💪 Protein'],
+      [/olej|máslo|med|sirup|arašídové máslo/, '🧈 Tuky a sladidla'],
+      [/omáčka|protlak|dresink|sójo|ocet|kření|koření|bylink|sůl|pepř/, '🧂 Koření a omáčky'],
+      [/tyčink|pudink/, '🍫 Sladkosti'],
+    ];
+    for (const [re, cat] of cats) { if (re.test(n)) return cat; }
+    return '📦 Ostatní';
+  };
+
+  // Collect and merge all ingredients across all days/meals
+  const merged = {};
+  Object.values(plan.meals).forEach(day => {
+    Object.values(day.meals || {}).forEach(meal => {
+      (meal.ingredients || []).forEach(raw => {
+        const p = parseIng(raw);
+        const key = p.name.toLowerCase();
+        if (!merged[key]) {
+          merged[key] = { name: p.name, qty: p.qty, unit: p.unit, category: categorize(p.name), checked: false };
+        } else if (p.qty > 0 && merged[key].unit === p.unit) {
+          merged[key].qty += p.qty;
+        } else if (p.qty > 0) {
+          // Different units — just list both
+          if (!merged[key].also) merged[key].also = [];
+          merged[key].also.push(`${p.qty} ${p.unit}`);
+        }
+      });
+    });
+  });
+
+  // Format display name with merged quantities
+  const list = Object.values(merged).map(item => {
+    let display = item.name;
+    if (item.qty > 0) {
+      // Pretty-print qty
+      const q = item.qty % 1 === 0 ? item.qty : item.qty.toFixed(1).replace('.0','');
+      display += ` ${q} ${item.unit}`;
+    }
+    if (item.also) display += ` + ${item.also.join(' + ')}`;
+    return { ...item, display };
+  });
+
+  // Sort by category, then name
+  list.sort((a, b) => a.category.localeCompare(b.category, 'cs') || a.name.localeCompare(b.name, 'cs'));
+
   push('shopping_lists', { id: genId(), user_id: uid, week_start: ws, items: list, created_at: new Date().toISOString() });
   res.json(list);
 });
