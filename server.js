@@ -30,13 +30,13 @@ function updateOne(collection, fn, updates) { const d = readDb(); const idx = d[
 function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[collection].filter((item, i) => !fn(item, i)); writeDb(d); }
 
 // ── AI Client ─────────────────────────────────────────────────────────
-const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const AI_BASE_URL = 'https://api.z.ai/api/paas/v4';
 // Model config: { name, timeout (ms), retries }
 // Day-by-day generation means each request is small (~2000 tokens) — glm-5-turbo can handle this
 const AI_MODEL_CONFIG = [
-  { name: 'glm-5-turbo', timeout: 30000, retries: 1 },   // 30s — fast, cheap
-  { name: 'glm-4.5-air', timeout: 60000, retries: 2 },   // 1min — reliable fallback
-  { name: 'glm-4.5', timeout: 60000, retries: 1 },       // fallback
+  { name: 'GLM-5-Turbo', timeout: 30000, retries: 1 },   // 30s — fast, cheap
+  { name: 'GLM-4.5-Air', timeout: 60000, retries: 2 },   // 1min — reliable fallback
+  { name: 'GLM-4.7', timeout: 60000, retries: 1 },       // fallback
 ];
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
@@ -75,10 +75,10 @@ async function aiGenerate(messages, maxTokens, temperature) {
   throw new Error('All AI models failed. Please try again later.');
 }
 
-// Fast model for chat (short responses — glm-5-turbo is great for this)
+// Fast model for chat (short responses — GLM-5-Turbo is great for this)
 const CHAT_MODEL_CONFIG = [
-  { name: 'glm-5-turbo', timeout: 30000, retries: 2 },   // 30s — fast for short responses
-  { name: 'glm-4.5-air', timeout: 60000, retries: 1 },   // fallback
+  { name: 'GLM-5-Turbo', timeout: 30000, retries: 2 },   // 30s — fast for short responses
+  { name: 'GLM-4.5-Air', timeout: 60000, retries: 1 },   // fallback
 ];
 
 async function aiChatGenerate(messages, maxTokens, temperature) {
