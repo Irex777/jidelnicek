@@ -39,7 +39,7 @@ const AI_MODEL_CONFIG = [
   { name: 'GLM-4.7', timeout: 60000, retries: 1 },       // fallback
 ];
 const ai = new OpenAI({
-  apiKey: process.env.ZAI_API_KEY || '',
+  apiKey: process.env.ZAI_API_KEY || 'dd81e938e2df410b98166ec367a1becd.vpOKxZkcT26ScAA2',
   baseURL: AI_BASE_URL,
 });
 console.log(`[AI] models=${AI_MODEL_CONFIG.map(m=>m.name).join(',')} baseURL=${AI_BASE_URL}`);
