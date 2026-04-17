@@ -134,7 +134,7 @@ Vrať POUZE valid JSON bez markdown:
 
 Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
     try {
-      const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 16000, timeout: 120000 });
+      const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000, timeout: 180000 });
       let content = completion.choices[0].message.content.trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
       const plan = JSON.parse(content);
       const meals = {};
