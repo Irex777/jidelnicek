@@ -134,8 +134,19 @@ Vrať POUZE valid JSON bez markdown:
 
 Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
     try {
-      const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000, timeout: 180000 });
-      let content = completion.choices[0].message.content.trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
+      console.log(`[AI] Starting generation for user ${user.id}, model=${AI_MODEL}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
+      const completion = await ai.chat.completions.create(
+        { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 },
+        { signal: controller.signal }
+      );
+      clearTimeout(timeoutId);
+      let content = (completion.choices[0].message.content || '').trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
+      if (!content) {
+        throw new Error('AI returned empty content (reasoning model used all tokens). Try again.');
+      }
+      console.log(`[AI] Got response, content length: ${content.length}`);
       const plan = JSON.parse(content);
       const meals = {};
       plan.days.forEach((day, i) => { meals[i] = { day: day.day, total_calories: day.total_calories, total_protein: day.total_protein, total_carbs: day.total_carbs, total_fat: day.total_fat, meals: day.meals }; });
@@ -176,8 +187,17 @@ ${currentPlan ? 'Aktuální plán:\n'+JSON.stringify(currentPlan,null,2) : 'Žá
 Pokud měníš jídelníček, vrať JSON: {"meals":{"0":{"day":"...","total_calories":N,...,"meals":{...}},...}}. Jinak vrať text.`;
 
   try {
-    const completion = await ai.chat.completions.create({ model: AI_MODEL, messages: [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))], temperature: 0.7, max_tokens: 4000, stream: false, timeout: 60000 });
-    let content = completion.choices[0].message.content.trim();
+    const controller2 = new AbortController();
+    const timeoutId2 = setTimeout(() => controller2.abort(), 60000);
+    const completion = await ai.chat.completions.create(
+      { model: AI_MODEL, messages: [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))], temperature: 0.7, max_tokens: 4000, stream: false },
+      { signal: controller2.signal }
+    );
+    clearTimeout(timeoutId2);
+    let content = (completion.choices[0].message.content || '').trim();
+    if (!content) {
+      return res.json({ reply: 'Omlouvám se, nepodařilo se mi vygenerovat odpověď. Zkuste to prosím znovu.' });
+    }
     let updatedPlan = null;
     if (content.includes('"meals"')) {
       try {
