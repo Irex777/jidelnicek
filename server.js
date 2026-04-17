@@ -31,37 +31,44 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODELS = ['glm-5-turbo', 'glm-4.5-air', 'glm-4.5']; // 5-turbo first (fastest), then air, then 4.5
-const MAX_RETRIES = 3;
+// Model config: { name, timeout (ms), retries }
+// glm-5-turbo: fast for chat but times out on long generation (16000 tok) — short timeout + 1 retry
+// glm-4.5-air: reliable workhorse for heavy generation — longer timeout + 2 retries
+// glm-4.5: fallback — solid but slower
+const AI_MODEL_CONFIG = [
+  { name: 'glm-5-turbo', timeout: 30000, retries: 1 },  // 30s, 1 try — fail fast if too heavy
+  { name: 'glm-4.5-air', timeout: 120000, retries: 2 },  // 2min, 2 tries — reliable for big jobs
+  { name: 'glm-4.5', timeout: 120000, retries: 2 },      // 2min, 2 tries — fallback
+];
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: AI_BASE_URL,
 });
-console.log(`[AI] models=${AI_MODELS.join(',')} baseURL=${AI_BASE_URL}`);
+console.log(`[AI] models=${AI_MODEL_CONFIG.map(m=>m.name).join(',')} baseURL=${AI_BASE_URL}`);
 
-// Try models in order with retries, return first successful response
+// Try models in order with per-model timeout and retries
 async function aiGenerate(messages, maxTokens, temperature) {
-  for (const model of AI_MODELS) {
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  for (const cfg of AI_MODEL_CONFIG) {
+    for (let attempt = 1; attempt <= cfg.retries; attempt++) {
       try {
-        console.log(`[AI] Trying ${model} (attempt ${attempt}/${MAX_RETRIES})`);
+        console.log(`[AI] Trying ${cfg.name} (attempt ${attempt}/${cfg.retries}, timeout ${cfg.timeout}ms)`);
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 120000);
+        const timeoutId = setTimeout(() => controller.abort(), cfg.timeout);
         const completion = await ai.chat.completions.create(
-          { model, messages, temperature, max_tokens: maxTokens },
+          { model: cfg.name, messages, temperature, max_tokens: maxTokens },
           { signal: controller.signal }
         );
         clearTimeout(timeoutId);
         const content = (completion.choices[0].message.content || '').trim();
         if (!content) {
-          console.log(`[AI] ${model} returned empty content, trying next...`);
+          console.log(`[AI] ${cfg.name} returned empty content, trying next model...`);
           break; // skip retries for this model, move to next
         }
-        console.log(`[AI] ${model} returned ${content.length} chars (attempt ${attempt})`);
-        return { content, model };
+        console.log(`[AI] ${cfg.name} returned ${content.length} chars (attempt ${attempt})`);
+        return { content, model: cfg.name };
       } catch (err) {
-        console.log(`[AI] ${model} attempt ${attempt} failed: ${err.message}`);
-        if (attempt < MAX_RETRIES) {
+        console.log(`[AI] ${cfg.name} attempt ${attempt} failed: ${err.message}`);
+        if (attempt < cfg.retries) {
           await new Promise(r => setTimeout(r, 2000 * attempt)); // backoff
         }
       }
@@ -85,7 +92,7 @@ function calcBMR(u) {
 function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
 // ── API: Users ────────────────────────────────────────────────────────
-app.get('/api/debug', (req, res) => res.json({ models: AI_MODELS, baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
+app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
 app.post('/api/users', (req, res) => {
