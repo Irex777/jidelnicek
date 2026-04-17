@@ -30,7 +30,7 @@ function updateOne(collection, fn, updates) { const d = readDb(); const idx = d[
 function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[collection].filter((item, i) => !fn(item, i)); writeDb(d); }
 
 // ── AI Client ─────────────────────────────────────────────────────────
-const AI_BASE_URL = 'https://api.z.ai/api/paas/v4';
+const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 // Model config: { name, timeout (ms), retries }
 // Day-by-day generation means each request is small (~2000 tokens) — glm-5-turbo can handle this
 const AI_MODEL_CONFIG = [
