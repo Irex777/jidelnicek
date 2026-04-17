@@ -138,7 +138,7 @@ Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 300000);
       const completion = await ai.chat.completions.create(
-        { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 },
+        { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 16000 },
         { signal: controller.signal }
       );
       clearTimeout(timeoutId);
@@ -147,7 +147,42 @@ Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}
         throw new Error('AI returned empty content (reasoning model used all tokens). Try again.');
       }
       console.log(`[AI] Got response, content length: ${content.length}`);
-      const plan = JSON.parse(content);
+      let plan;
+      try {
+        plan = JSON.parse(content);
+      } catch (e) {
+        // Try to fix truncated JSON by closing open brackets
+        console.log('[AI] JSON parse failed, attempting repair...');
+        let fixed = content;
+        let openBraces = 0, openBrackets = 0;
+        for (const ch of fixed) {
+          if (ch === '{') openBraces++;
+          if (ch === '}') openBraces--;
+          if (ch === '[') openBrackets++;
+          if (ch === ']') openBrackets--;
+        }
+        // Try to close the last complete day entry
+        const lastDay = fixed.lastIndexOf('"dinner"');
+        if (lastDay > 0) {
+          const afterDinner = fixed.indexOf('}', lastDay);
+          if (afterDinner > 0) {
+            fixed = fixed.substring(0, afterDinner + 1);
+            // Re-count from truncated
+            openBraces = 0; openBrackets = 0;
+            for (const ch of fixed) {
+              if (ch === '{') openBraces++;
+              if (ch === '}') openBraces--;
+              if (ch === '[') openBrackets++;
+              if (ch === ']') openBrackets--;
+            }
+            fixed += '}'.repeat(Math.max(0, openBraces));
+            fixed += ']'.repeat(Math.max(0, openBrackets));
+            fixed += '}';
+          }
+        }
+        plan = JSON.parse(fixed);
+      }
+      if (!plan.days || !Array.isArray(plan.days)) throw new Error('Invalid plan structure: missing days array');
       const meals = {};
       plan.days.forEach((day, i) => { meals[i] = { day: day.day, total_calories: day.total_calories, total_protein: day.total_protein, total_carbs: day.total_carbs, total_fat: day.total_fat, meals: day.meals }; });
 
