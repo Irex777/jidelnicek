@@ -279,7 +279,7 @@ async function generatePlan() {
           clearInterval(genTimer);
           throw new Error(sj.error || 'Generation failed');
         }
-      if (pollCount > 60) {
+      if (pollCount > 100) {
           clearInterval(poll);
           clearInterval(genTimer);
           throw new Error('Generování trvalo příliš dlouho (timeout). Zkuste to prosím znovu.');

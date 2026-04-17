@@ -136,7 +136,7 @@ Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}
     try {
       console.log(`[AI] Starting generation for user ${user.id}, model=${AI_MODEL}`);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000);
+      const timeoutId = setTimeout(() => controller.abort(), 300000);
       const completion = await ai.chat.completions.create(
         { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 },
         { signal: controller.signal }
