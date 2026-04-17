@@ -60,7 +60,7 @@ async function aiGenerate(messages, maxTokens, temperature) {
         clearTimeout(timeoutId);
         const content = (completion.choices[0].message.content || '').trim();
         if (!content) {
-          console.log(`[AI] ${cfg.name} returned empty content, trying next model...`);
+          console.log(`[AI] ${cfg.name} returned empty content (likely all reasoning tokens), trying next model...`);
           break; // skip retries for this model, move to next
         }
         console.log(`[AI] ${cfg.name} returned ${content.length} chars (attempt ${attempt})`);
@@ -129,17 +129,17 @@ app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => 
 // Quick AI test endpoint - direct SDK call
 app.get('/api/test-ai', async (req, res) => {
   try {
-    console.log(`[test-ai] Direct call, baseURL=${AI_BASE_URL}, key=${(process.env.ZAI_API_KEY||'').substring(0,8)}...`);
+    console.log(`[test-ai] Direct call, baseURL=${AI_BASE_URL}`);
     const completion = await ai.chat.completions.create({
       model: 'GLM-5-Turbo',
-      messages: [{ role: 'user', content: 'Say hi' }],
-      max_tokens: 50,
+      messages: [{ role: 'user', content: 'Řekni ahoj jedním slovem' }],
+      max_tokens: 500,
       temperature: 0.5,
     });
     const content = completion.choices[0]?.message?.content || '';
-    res.json({ ok: true, model: completion.model, content: content.substring(0, 100) });
+    const reasoning = completion.choices[0]?.message?.reasoning_content || '';
+    res.json({ ok: true, model: completion.model, content, reasoning: reasoning.substring(0, 100), usage: completion.usage });
   } catch (err) {
-    console.log(`[test-ai] Error: ${JSON.stringify({name:err.name,status:err.status,message:err.message,code:err.code,type:typeof err}).substring(0,500)}`);
     res.json({ ok: false, error: `${err.name}: ${err.status||err.code} ${err.message}` });
   }
 });
