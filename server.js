@@ -31,35 +31,40 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODELS = ['glm-5-turbo', 'glm-4.5']; // tries 5-turbo first (faster), falls back to 4.5
+const AI_MODELS = ['glm-5-turbo', 'glm-4.5-air', 'glm-4.5']; // 5-turbo first (fastest), then air, then 4.5
+const MAX_RETRIES = 3;
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: AI_BASE_URL,
 });
 console.log(`[AI] models=${AI_MODELS.join(',')} baseURL=${AI_BASE_URL}`);
 
-// Try models in order, return first successful response
+// Try models in order with retries, return first successful response
 async function aiGenerate(messages, maxTokens, temperature) {
   for (const model of AI_MODELS) {
-    try {
-      console.log(`[AI] Trying model: ${model}`);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000);
-      const completion = await ai.chat.completions.create(
-        { model, messages, temperature, max_tokens: maxTokens },
-        { signal: controller.signal }
-      );
-      clearTimeout(timeoutId);
-      const content = (completion.choices[0].message.content || '').trim();
-      if (!content) {
-        console.log(`[AI] Model ${model} returned empty content (reasoning ate all tokens), trying next...`);
-        continue;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`[AI] Trying ${model} (attempt ${attempt}/${MAX_RETRIES})`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 120000);
+        const completion = await ai.chat.completions.create(
+          { model, messages, temperature, max_tokens: maxTokens },
+          { signal: controller.signal }
+        );
+        clearTimeout(timeoutId);
+        const content = (completion.choices[0].message.content || '').trim();
+        if (!content) {
+          console.log(`[AI] ${model} returned empty content, trying next...`);
+          break; // skip retries for this model, move to next
+        }
+        console.log(`[AI] ${model} returned ${content.length} chars (attempt ${attempt})`);
+        return { content, model };
+      } catch (err) {
+        console.log(`[AI] ${model} attempt ${attempt} failed: ${err.message}`);
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 2000 * attempt)); // backoff
+        }
       }
-      console.log(`[AI] Model ${model} returned ${content.length} chars`);
-      return { content, model };
-    } catch (err) {
-      console.log(`[AI] Model ${model} failed: ${err.message}`);
-      continue;
     }
   }
   throw new Error('All AI models failed. Please try again later.');
