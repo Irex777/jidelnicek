@@ -125,12 +125,18 @@ app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => 
 
 // Quick AI test endpoint
 app.get('/api/test-ai', async (req, res) => {
-  try {
-    const { content, model } = await aiGenerate([{ role: 'user', content: 'Řekni ahoj jedním slovem' }], 100, 0.5);
-    res.json({ ok: true, model, response: content });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
+  const results = [];
+  for (const cfg of AI_MODEL_CONFIG) {
+    try {
+      console.log(`[test-ai] Trying ${cfg.name} with key: ${(process.env.ZAI_API_KEY || 'fallback').substring(0, 8)}...`);
+      const { content, model } = await aiGenerate([{ role: 'user', content: 'Řekni ahoj jedním slovem' }], 100, 0.5);
+      results.push({ model, ok: true, content: content.substring(0, 50) });
+      break;
+    } catch (err) {
+      results.push({ model: cfg.name, ok: false, error: err.message });
+    }
   }
+  res.json(results);
 });
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
