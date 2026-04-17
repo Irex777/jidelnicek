@@ -31,7 +31,7 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODELS = ['glm-5-turbo', 'glm-4.5']; // primary, fallback
+const AI_MODELS = ['glm-5-turbo', 'glm-4.5', 'glm-4.5-air']; // primary, fallbacks
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: AI_BASE_URL,
@@ -44,7 +44,7 @@ async function aiGenerate(messages, maxTokens, temperature) {
     try {
       console.log(`[AI] Trying model: ${model}`);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 300000);
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
       const completion = await ai.chat.completions.create(
         { model, messages, temperature, max_tokens: maxTokens },
         { signal: controller.signal }
