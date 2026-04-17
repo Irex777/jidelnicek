@@ -122,6 +122,16 @@ function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.
 
 // ── API: Users ────────────────────────────────────────────────────────
 app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
+
+// Quick AI test endpoint
+app.get('/api/test-ai', async (req, res) => {
+  try {
+    const { content, model } = await aiGenerate([{ role: 'user', content: 'Řekni ahoj jedním slovem' }], 100, 0.5);
+    res.json({ ok: true, model, response: content });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
 app.post('/api/users', (req, res) => {
