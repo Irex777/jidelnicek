@@ -32,10 +32,11 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 // Model config: { name, timeout (ms), retries }
-// Day-by-day generation means each request is small (~2000 tokens) — glm-5-turbo can handle this
+// GLM-5-Turbo uses reasoning tokens — wastes budget on structured JSON output
+// GLM-4.5-Air is the best workhorse for generation (fast, reliable JSON)
+// GLM-4.7 as fallback
 const AI_MODEL_CONFIG = [
-  { name: 'GLM-5-Turbo', timeout: 30000, retries: 1 },   // 30s — fast, cheap
-  { name: 'GLM-4.5-Air', timeout: 60000, retries: 2 },   // 1min — reliable fallback
+  { name: 'GLM-4.5-Air', timeout: 60000, retries: 2 },   // 1min — primary, great for JSON
   { name: 'GLM-4.7', timeout: 60000, retries: 1 },       // fallback
 ];
 const ai = new OpenAI({
