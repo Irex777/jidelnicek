@@ -66,7 +66,7 @@ async function aiGenerate(messages, maxTokens, temperature) {
         console.log(`[AI] ${cfg.name} returned ${content.length} chars (attempt ${attempt})`);
         return { content, model: cfg.name };
       } catch (err) {
-        const errMsg = err.status ? `${err.status} ${err.message}` : err.message;
+        const errMsg = err.status ? `${err.status} ${err.message}` : (err.message || err.code || JSON.stringify(err).substring(0, 200));
         console.log(`[AI] ${cfg.name} attempt ${attempt} failed: ${errMsg}`);
         allErrors.push(`${cfg.name}:${errMsg}`);
         if (attempt < cfg.retries) {
