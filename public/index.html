@@ -32,12 +32,12 @@
       <!-- Week nav bar -->
       <div class="topbar">
         <div class="week-nav">
-          <button onclick="changeWeek(-1)">◀</button>
+          <button onclick="changeWeek(-1)">‹</button>
           <span class="week-label" id="weekLabel"></span>
-          <button onclick="changeWeek(1)">▶</button>
+          <button onclick="changeWeek(1)">›</button>
         </div>
+        <button class="btn-generate" onclick="generatePlan()" id="btnGenerate">✨ Generovat</button>
         <div class="topbar-actions">
-          <button class="btn-generate" onclick="generatePlan()" id="btnGenerate">✨ Generovat</button>
           <button onclick="showShopping()" title="Nákupní seznam">🛒</button>
           <button onclick="showPrep()" title="Příprava">📋</button>
           <button onclick="deletePlan()" class="danger" title="Smazat">🗑️</button>
