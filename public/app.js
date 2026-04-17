@@ -259,8 +259,10 @@ async function generatePlan() {
     const progText = document.querySelector('.gen-text');
     if (progText) progText.textContent = 'AI přemýšlí nad jídelníčkem...';
 
-    // Poll for result
+    // Poll for result (max 3 minutes)
+    let pollCount = 0;
     const poll = setInterval(async () => {
+      pollCount++;
       try {
         const sr = await fetch(`/api/generate-status/${data.jobId}`);
         const sj = await sr.json();
@@ -276,6 +278,11 @@ async function generatePlan() {
           clearInterval(poll);
           clearInterval(genTimer);
           throw new Error(sj.error || 'Generation failed');
+        }
+      if (pollCount > 60) {
+          clearInterval(poll);
+          clearInterval(genTimer);
+          throw new Error('Generování trvalo příliš dlouho (timeout). Zkuste to prosím znovu.');
         }
       } catch (e) {
         clearInterval(poll);

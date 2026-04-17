@@ -31,7 +31,7 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODEL_NAME = 'glm-5-turbo';
+const AI_MODEL_NAME = 'glm-4.5';
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: AI_BASE_URL,
@@ -146,8 +146,8 @@ Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}
       push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
       pendingJobs[jobId] = { status: 'done', result: { meals } };
     } catch (err) {
-      console.error('AI error:', err);
-      pendingJobs[jobId] = { status: 'error', error: err.message };
+      console.error('AI error:', err.message || err);
+      pendingJobs[jobId] = { status: 'error', error: err.message || 'AI generation failed. The API may be temporarily unavailable. Please try again in a moment.' };
     }
   })();
 });
