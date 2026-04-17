@@ -46,6 +46,7 @@ console.log(`[AI] models=${AI_MODEL_CONFIG.map(m=>m.name).join(',')} baseURL=${A
 
 // Try models in order with per-model timeout and retries
 async function aiGenerate(messages, maxTokens, temperature) {
+  const allErrors = [];
   for (const cfg of AI_MODEL_CONFIG) {
     for (let attempt = 1; attempt <= cfg.retries; attempt++) {
       try {
@@ -65,14 +66,16 @@ async function aiGenerate(messages, maxTokens, temperature) {
         console.log(`[AI] ${cfg.name} returned ${content.length} chars (attempt ${attempt})`);
         return { content, model: cfg.name };
       } catch (err) {
-        console.log(`[AI] ${cfg.name} attempt ${attempt} failed: ${err.message}`);
+        const errMsg = err.status ? `${err.status} ${err.message}` : err.message;
+        console.log(`[AI] ${cfg.name} attempt ${attempt} failed: ${errMsg}`);
+        allErrors.push(`${cfg.name}:${errMsg}`);
         if (attempt < cfg.retries) {
           await new Promise(r => setTimeout(r, 2000 * attempt)); // backoff
         }
       }
     }
   }
-  throw new Error('All AI models failed. Please try again later.');
+  throw new Error(allErrors.join(' | '));
 }
 
 // Fast model for chat (short responses — GLM-5-Turbo is great for this)
