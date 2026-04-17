@@ -231,13 +231,13 @@ async function generatePlan() {
   area.innerHTML = `<div class="gen-progress">
     <div class="gen-emoji">🧠</div>
     <div class="gen-text">AI vytváří váš jídelníček...</div>
-    <div class="gen-timer" id="genTimer">0s — prosím čekejte</div>
+    <div class="gen-timer" id="genTimer">0/7 dní — prosím čekejte</div>
   </div>`;
 
   genTimer = setInterval(() => {
     genSeconds++;
     const el = document.getElementById('genTimer');
-    if (el) el.textContent = `${genSeconds}s — prosím čekejte`;
+    if (el && !el.dataset.days) el.textContent = `${genSeconds}s — prosím čekejte`;
   }, 1000);
 
   try {
@@ -253,19 +253,44 @@ async function generatePlan() {
     }
 
     const data = await res.json();
+
+    // Plan already exists — show it immediately
+    if (data.status === 'exists') {
+      clearInterval(genTimer);
+      currentPlan = { meals: data.meals };
+      renderPlan();
+      btn.disabled = false;
+      return;
+    }
+
     if (!data.jobId) throw new Error('No job ID returned');
 
     // Update progress text
     const progText = document.querySelector('.gen-text');
-    if (progText) progText.textContent = 'AI přemýšlí nad jídelníčkem...';
+    if (progText) progText.textContent = 'AI přemýšlí nad prvním dnem...';
 
-    // Poll for result (max 3 minutes)
+    // Poll for result — show day-by-day progress
     let pollCount = 0;
     const poll = setInterval(async () => {
       pollCount++;
       try {
         const sr = await fetch(`/api/generate-status/${data.jobId}`);
         const sj = await sr.json();
+
+        // Update progress display
+        if (sj.progress !== undefined) {
+          const timer = document.getElementById('genTimer');
+          const text = document.querySelector('.gen-text');
+          if (timer) timer.textContent = `${sj.progress}/${sj.total} dní hotovo`;
+          if (text && sj.progress < sj.total) text.textContent = `AI přemýšlí nad dnem ${sj.progress + 1}/${sj.total}...`;
+
+          // Show partial results in real-time
+          if (sj.partialMeals && Object.keys(sj.partialMeals).length > 0) {
+            currentPlan = { meals: sj.partialMeals };
+            // Don't renderPlan() fully — just update the timer area
+          }
+        }
+
         if (sj.status === 'done') {
           clearInterval(poll);
           clearInterval(genTimer);
@@ -274,12 +299,16 @@ async function generatePlan() {
           loadChat();
           btn.disabled = false;
           btn.textContent = '✨ Generovat';
+          if (sj.error) {
+            // Partial success warning
+            setTimeout(() => alert('⚠️ ' + sj.error), 500);
+          }
         } else if (sj.status === 'error') {
           clearInterval(poll);
           clearInterval(genTimer);
           throw new Error(sj.error || 'Generation failed');
         }
-      if (pollCount > 130) {
+      if (pollCount > 200) {
           clearInterval(poll);
           clearInterval(genTimer);
           throw new Error('Generování trvalo příliš dlouho (timeout). Zkuste to prosím znovu.');
@@ -292,7 +321,7 @@ async function generatePlan() {
         btn.disabled = false;
         btn.textContent = '✨ Generovat';
       }
-    }, 3000);
+    }, 2000);
   } catch (err) {
     clearInterval(genTimer);
     alert('Chyba: ' + err.message);

@@ -32,12 +32,11 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 // Model config: { name, timeout (ms), retries }
-// glm-5-turbo: can't generate full 7-day plans (always times out) — skip for generation
-// glm-4.5-air: primary workhorse — fast and reliable
-// glm-4.5: fallback — solid when 4.5-air is overloaded
+// Day-by-day generation means each request is small (~2000 tokens) — glm-5-turbo can handle this
 const AI_MODEL_CONFIG = [
-  { name: 'glm-4.5-air', timeout: 120000, retries: 2 },  // 2min, 2 tries — primary
-  { name: 'glm-4.5', timeout: 120000, retries: 2 },      // 2min, 2 tries — fallback
+  { name: 'glm-5-turbo', timeout: 30000, retries: 1 },   // 30s — fast, cheap
+  { name: 'glm-4.5-air', timeout: 60000, retries: 2 },   // 1min — reliable fallback
+  { name: 'glm-4.5', timeout: 60000, retries: 1 },       // fallback
 ];
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
@@ -175,85 +174,121 @@ app.delete('/api/plans/:userId/:weekStart', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── API: Generate with AI (async) ─────────────────────────────────────
+// ── API: Generate with AI (day-by-day, each saved immediately) ────────
 const pendingJobs = {};
 
 app.post('/api/generate/:userId', async (req, res) => {
   const { week_start } = req.body;
   const user = find('users', u => u.id === parseInt(req.params.userId));
   if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // Check if plan already exists for this week — don't regenerate
+  const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
+  if (existing && existing.meals && Object.keys(existing.meals).length >= 7) {
+    return res.json({ jobId: null, status: 'exists', meals: existing.meals });
+  }
+
   const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  pendingJobs[jobId] = { status: 'pending', result: null, error: null };
+  pendingJobs[jobId] = { status: 'pending', progress: 0, total: 7, result: null, error: null, partialMeals: {} };
   res.json({ jobId, status: 'pending' });
 
-  // Run generation in background
+  // Run day-by-day generation in background
   (async () => {
     const loc = getLocale(user.locale);
     const targetCal = user.calories_target || 2000;
-    const prompt = `Jsi profesionální výživový poradce. Vytvoř týdenní jídelníček v JSON formátu.
+    const meals = {};
 
-Uživatel: ${user.name}
-Váha: ${user.weight_current||'?'}kg → ${user.weight_goal||'?'}kg, výška: ${user.height||'?'}cm, věk: ${user.age||'?'}, ${user.sex==='male'?'muž':user.sex==='female'?'žena':'?'}
+    // Restore any partial progress from existing plan
+    if (existing && existing.meals) {
+      Object.assign(meals, existing.meals);
+    }
+
+    const daysToGenerate = [];
+    for (let i = 0; i < 7; i++) {
+      if (!meals[i]) daysToGenerate.push(i);
+    }
+
+    console.log(`[AI] Starting day-by-day generation for user ${user.id}, ${daysToGenerate.length} days to generate`);
+
+    for (const dayIdx of daysToGenerate) {
+      const dayName = loc.dayNames[dayIdx];
+      // Build context from already-generated days so meals don't repeat
+      const prevMeals = Object.values(meals).map(d => d.meals ? Object.values(d.meals).map(m => m.name).join(', ') : '').filter(Boolean);
+      const contextStr = prevMeals.length > 0 ? `\nJiž navržená jídla (NEOPAKUJ): ${prevMeals.join(' | ')}` : '';
+
+      const prompt = `Jsi profesionální výživový poradce. Vytvoř JEDEN den (${dayName}) jídelníčku v JSON.
+
+Uživatel: ${user.name}, ${user.sex==='male'?'muž':user.sex==='female'?'žena':'?'}, ${user.age||'?'} let, ${user.weight_current||'?'}kg → ${user.weight_goal||'?'}kg
 Aktivita: ${user.activity_level||'moderate'}, diety: ${user.dietary_restrictions||'žádné'}
-Cíl: ${targetCal} kcal/den
+Cíl: ${targetCal} kcal/den, max 30min příprava.${contextStr}
 
 Vrať POUZE valid JSON bez markdown:
-{"days":[{"day":"${loc.dayNames[0]}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep":"stručný postup"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}...7 days]}
+{"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep":"stručný postup"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
 
-Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
-    try {
-      console.log(`[AI] Starting generation for user ${user.id}`);
-      const { content: rawContent } = await aiGenerate([{ role: 'user', content: prompt }], 16000, 0.8);
-      let content = rawContent.replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
-      console.log(`[AI] Got response, content length: ${content.length}`);
-      let plan;
+Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky. Rozložení: snídaně~22%, dop. svačina~8%, oběd~30%, odp. svačina~8%, večeře~32%.`;
+
       try {
-        plan = JSON.parse(content);
-      } catch (e) {
-        // Try to fix truncated JSON by closing open brackets
-        console.log('[AI] JSON parse failed, attempting repair...');
-        let fixed = content;
-        let openBraces = 0, openBrackets = 0;
-        for (const ch of fixed) {
-          if (ch === '{') openBraces++;
-          if (ch === '}') openBraces--;
-          if (ch === '[') openBrackets++;
-          if (ch === ']') openBrackets--;
-        }
-        // Try to close the last complete day entry
-        const lastDay = fixed.lastIndexOf('"dinner"');
-        if (lastDay > 0) {
-          const afterDinner = fixed.indexOf('}', lastDay);
-          if (afterDinner > 0) {
-            fixed = fixed.substring(0, afterDinner + 1);
-            // Re-count from truncated
-            openBraces = 0; openBrackets = 0;
-            for (const ch of fixed) {
-              if (ch === '{') openBraces++;
-              if (ch === '}') openBraces--;
-              if (ch === '[') openBrackets++;
-              if (ch === ']') openBrackets--;
-            }
-            fixed += '}'.repeat(Math.max(0, openBraces));
-            fixed += ']'.repeat(Math.max(0, openBrackets));
-            fixed += '}';
-          }
-        }
-        plan = JSON.parse(fixed);
-      }
-      if (!plan.days || !Array.isArray(plan.days)) throw new Error('Invalid plan structure: missing days array');
-      const meals = {};
-      plan.days.forEach((day, i) => { meals[i] = { day: day.day, total_calories: day.total_calories, total_protein: day.total_protein, total_carbs: day.total_carbs, total_fat: day.total_fat, meals: day.meals }; });
+        console.log(`[AI] Generating day ${dayIdx+1}/7: ${dayName}`);
+        const { content: rawContent, model } = await aiGenerate(
+          [{ role: 'user', content: prompt }], 4000, 0.8
+        );
+        let content = rawContent.replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
+        const dayPlan = JSON.parse(content);
 
-      const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-      if (existing) { updateOne('meal_plans', p => p.id === existing.id, { meals, updated_at: new Date().toISOString() }); }
-      else { push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); }
-      push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
-      pendingJobs[jobId] = { status: 'done', result: { meals } };
-    } catch (err) {
-      console.error('AI error:', err.message || err);
-      pendingJobs[jobId] = { status: 'error', error: err.message || 'AI generation failed. The API may be temporarily unavailable. Please try again in a moment.' };
+        meals[dayIdx] = {
+          day: dayPlan.day || dayName,
+          total_calories: dayPlan.total_calories,
+          total_protein: dayPlan.total_protein,
+          total_carbs: dayPlan.total_carbs,
+          total_fat: dayPlan.total_fat,
+          meals: dayPlan.meals
+        };
+
+        // Save progress after EACH day — survives crashes
+        const existingPlan = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
+        if (existingPlan) {
+          updateOne('meal_plans', p => p.id === existingPlan.id, { meals, updated_at: new Date().toISOString() });
+        } else {
+          push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+        }
+
+        const done = Object.keys(meals).length;
+        pendingJobs[jobId] = {
+          status: done >= 7 ? 'done' : 'pending',
+          progress: done, total: 7,
+          result: done >= 7 ? { meals } : null,
+          partialMeals: done < 7 ? { ...meals } : null,
+          error: null
+        };
+        console.log(`[AI] Day ${dayIdx+1}/7 done (${model}): ${dayPlan.total_calories} kcal`);
+
+      } catch (err) {
+        console.error(`[AI] Day ${dayIdx+1}/7 failed:`, err.message);
+        // If we have at least some days, save what we have and report partial success
+        if (Object.keys(meals).length > 0) {
+          const existingPlan = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
+          if (existingPlan) {
+            updateOne('meal_plans', p => p.id === existingPlan.id, { meals, updated_at: new Date().toISOString() });
+          } else {
+            push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+          }
+          pendingJobs[jobId] = {
+            status: 'done',
+            progress: Object.keys(meals).length, total: 7,
+            result: { meals },
+            partialMeals: null,
+            error: `Vygenerováno ${Object.keys(meals).length}/7 dní. Zkuste znovu pro doplnění chybějících dnů.`
+          };
+        } else {
+          pendingJobs[jobId] = { status: 'error', progress: 0, total: 7, result: null, error: err.message || 'AI generation failed' };
+        }
+        return;
+      }
     }
+
+    // All 7 days done
+    push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
+    console.log(`[AI] Complete plan saved for user ${user.id}, week ${week_start}`);
   })();
 });
 
@@ -261,7 +296,7 @@ app.get('/api/generate-status/:jobId', (req, res) => {
   const job = pendingJobs[req.params.jobId];
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job);
-  if (job.status !== 'pending') delete pendingJobs[req.params.jobId];
+  if (job.status === 'done' || job.status === 'error') delete pendingJobs[req.params.jobId];
 });
 
 // ── API: Chat ─────────────────────────────────────────────────────────
