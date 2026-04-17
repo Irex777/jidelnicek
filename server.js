@@ -32,12 +32,11 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 // Model config: { name, timeout (ms), retries }
-// glm-5-turbo: fast for chat but times out on long generation (16000 tok) — short timeout + 1 retry
-// glm-4.5-air: reliable workhorse for heavy generation — longer timeout + 2 retries
-// glm-4.5: fallback — solid but slower
+// glm-5-turbo: can't generate full 7-day plans (always times out) — skip for generation
+// glm-4.5-air: primary workhorse — fast and reliable
+// glm-4.5: fallback — solid when 4.5-air is overloaded
 const AI_MODEL_CONFIG = [
-  { name: 'glm-5-turbo', timeout: 30000, retries: 1 },  // 30s, 1 try — fail fast if too heavy
-  { name: 'glm-4.5-air', timeout: 120000, retries: 2 },  // 2min, 2 tries — reliable for big jobs
+  { name: 'glm-4.5-air', timeout: 120000, retries: 2 },  // 2min, 2 tries — primary
   { name: 'glm-4.5', timeout: 120000, retries: 2 },      // 2min, 2 tries — fallback
 ];
 const ai = new OpenAI({
@@ -75,6 +74,37 @@ async function aiGenerate(messages, maxTokens, temperature) {
     }
   }
   throw new Error('All AI models failed. Please try again later.');
+}
+
+// Fast model for chat (short responses — glm-5-turbo is great for this)
+const CHAT_MODEL_CONFIG = [
+  { name: 'glm-5-turbo', timeout: 30000, retries: 2 },   // 30s — fast for short responses
+  { name: 'glm-4.5-air', timeout: 60000, retries: 1 },   // fallback
+];
+
+async function aiChatGenerate(messages, maxTokens, temperature) {
+  for (const cfg of CHAT_MODEL_CONFIG) {
+    for (let attempt = 1; attempt <= cfg.retries; attempt++) {
+      try {
+        console.log(`[AI-Chat] Trying ${cfg.name} (attempt ${attempt}/${cfg.retries})`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), cfg.timeout);
+        const completion = await ai.chat.completions.create(
+          { model: cfg.name, messages, temperature, max_tokens: maxTokens },
+          { signal: controller.signal }
+        );
+        clearTimeout(timeoutId);
+        const content = (completion.choices[0].message.content || '').trim();
+        if (!content) { break; }
+        console.log(`[AI-Chat] ${cfg.name} returned ${content.length} chars`);
+        return { content, model: cfg.name };
+      } catch (err) {
+        console.log(`[AI-Chat] ${cfg.name} attempt ${attempt} failed: ${err.message}`);
+        if (attempt < cfg.retries) { await new Promise(r => setTimeout(r, 2000 * attempt)); }
+      }
+    }
+  }
+  throw new Error('Chat AI failed. Please try again.');
 }
 
 // ── Localization ──────────────────────────────────────────────────────
@@ -251,7 +281,7 @@ ${currentPlan ? 'Aktuální plán:\n'+JSON.stringify(currentPlan,null,2) : 'Žá
 Pokud měníš jídelníček, vrať JSON: {"meals":{"0":{"day":"...","total_calories":N,...,"meals":{...}},...}}. Jinak vrať text.`;
 
   try {
-    const { content } = await aiGenerate(
+    const { content } = await aiChatGenerate(
       [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))],
       4000, 0.7
     );
