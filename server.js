@@ -31,13 +31,39 @@ function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[col
 
 // ── AI Client ─────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODEL_NAME = 'glm-4.5';
+const AI_MODELS = ['glm-5-turbo', 'glm-4.5']; // primary, fallback
 const ai = new OpenAI({
   apiKey: process.env.ZAI_API_KEY || '',
   baseURL: AI_BASE_URL,
 });
-const AI_MODEL = AI_MODEL_NAME;
-console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL}`);
+console.log(`[AI] models=${AI_MODELS.join(',')} baseURL=${AI_BASE_URL}`);
+
+// Try models in order, return first successful response
+async function aiGenerate(messages, maxTokens, temperature) {
+  for (const model of AI_MODELS) {
+    try {
+      console.log(`[AI] Trying model: ${model}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 300000);
+      const completion = await ai.chat.completions.create(
+        { model, messages, temperature, max_tokens: maxTokens },
+        { signal: controller.signal }
+      );
+      clearTimeout(timeoutId);
+      const content = (completion.choices[0].message.content || '').trim();
+      if (!content) {
+        console.log(`[AI] Model ${model} returned empty content (reasoning ate all tokens), trying next...`);
+        continue;
+      }
+      console.log(`[AI] Model ${model} returned ${content.length} chars`);
+      return { content, model };
+    } catch (err) {
+      console.log(`[AI] Model ${model} failed: ${err.message}`);
+      continue;
+    }
+  }
+  throw new Error('All AI models failed. Please try again later.');
+}
 
 // ── Localization ──────────────────────────────────────────────────────
 const LOCALES = {
@@ -54,7 +80,7 @@ function calcBMR(u) {
 function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
 // ── API: Users ────────────────────────────────────────────────────────
-app.get('/api/debug', (req, res) => res.json({ model: AI_MODEL, baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
+app.get('/api/debug', (req, res) => res.json({ models: AI_MODELS, baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
 app.post('/api/users', (req, res) => {
@@ -134,18 +160,9 @@ Vrať POUZE valid JSON bez markdown:
 
 Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky, ~${targetCal}kcal/den, max 30min příprava.`;
     try {
-      console.log(`[AI] Starting generation for user ${user.id}, model=${AI_MODEL}`);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 300000);
-      const completion = await ai.chat.completions.create(
-        { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 16000 },
-        { signal: controller.signal }
-      );
-      clearTimeout(timeoutId);
-      let content = (completion.choices[0].message.content || '').trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
-      if (!content) {
-        throw new Error('AI returned empty content (reasoning model used all tokens). Try again.');
-      }
+      console.log(`[AI] Starting generation for user ${user.id}`);
+      const { content: rawContent } = await aiGenerate([{ role: 'user', content: prompt }], 16000, 0.8);
+      let content = rawContent.replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
       console.log(`[AI] Got response, content length: ${content.length}`);
       let plan;
       try {
@@ -222,17 +239,10 @@ ${currentPlan ? 'Aktuální plán:\n'+JSON.stringify(currentPlan,null,2) : 'Žá
 Pokud měníš jídelníček, vrať JSON: {"meals":{"0":{"day":"...","total_calories":N,...,"meals":{...}},...}}. Jinak vrať text.`;
 
   try {
-    const controller2 = new AbortController();
-    const timeoutId2 = setTimeout(() => controller2.abort(), 60000);
-    const completion = await ai.chat.completions.create(
-      { model: AI_MODEL, messages: [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))], temperature: 0.7, max_tokens: 4000, stream: false },
-      { signal: controller2.signal }
+    const { content } = await aiGenerate(
+      [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))],
+      4000, 0.7
     );
-    clearTimeout(timeoutId2);
-    let content = (completion.choices[0].message.content || '').trim();
-    if (!content) {
-      return res.json({ reply: 'Omlouvám se, nepodařilo se mi vygenerovat odpověď. Zkuste to prosím znovu.' });
-    }
     let updatedPlan = null;
     if (content.includes('"meals"')) {
       try {
