@@ -126,20 +126,22 @@ function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.
 // ── API: Users ────────────────────────────────────────────────────────
 app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY), keyPreview: (process.env.ZAI_API_KEY || '').substring(0, 8) + '...' }));
 
-// Quick AI test endpoint
+// Quick AI test endpoint - direct SDK call
 app.get('/api/test-ai', async (req, res) => {
-  const results = [];
-  for (const cfg of AI_MODEL_CONFIG) {
-    try {
-      console.log(`[test-ai] Trying ${cfg.name} with key: ${(process.env.ZAI_API_KEY || 'fallback').substring(0, 8)}...`);
-      const { content, model } = await aiGenerate([{ role: 'user', content: 'Řekni ahoj jedním slovem' }], 100, 0.5);
-      results.push({ model, ok: true, content: content.substring(0, 50) });
-      break;
-    } catch (err) {
-      results.push({ model: cfg.name, ok: false, error: err.message });
-    }
+  try {
+    console.log(`[test-ai] Direct call, baseURL=${AI_BASE_URL}, key=${(process.env.ZAI_API_KEY||'').substring(0,8)}...`);
+    const completion = await ai.chat.completions.create({
+      model: 'GLM-5-Turbo',
+      messages: [{ role: 'user', content: 'Say hi' }],
+      max_tokens: 50,
+      temperature: 0.5,
+    });
+    const content = completion.choices[0]?.message?.content || '';
+    res.json({ ok: true, model: completion.model, content: content.substring(0, 100) });
+  } catch (err) {
+    console.log(`[test-ai] Error: ${JSON.stringify({name:err.name,status:err.status,message:err.message,code:err.code,type:typeof err}).substring(0,500)}`);
+    res.json({ ok: false, error: `${err.name}: ${err.status||err.code} ${err.message}` });
   }
-  res.json(results);
 });
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
