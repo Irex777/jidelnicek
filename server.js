@@ -39,7 +39,7 @@ const AI_MODEL_CONFIG = [
   { name: 'GLM-4.7', timeout: 60000, retries: 1 },       // fallback
 ];
 const ai = new OpenAI({
-  apiKey: process.env.ZAI_API_KEY || 'dd81e938e2df410b98166ec367a1becd.vpOKxZkcT26ScAA2',
+  apiKey: process.env.ZAI_API_KEY,
   baseURL: AI_BASE_URL,
 });
 console.log(`[AI] models=${AI_MODEL_CONFIG.map(m=>m.name).join(',')} baseURL=${AI_BASE_URL}`);
@@ -124,25 +124,8 @@ function calcBMR(u) {
 function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
 // ── API: Users ────────────────────────────────────────────────────────
-app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY), keyPreview: (process.env.ZAI_API_KEY || '').substring(0, 8) + '...' }));
+app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
 
-// Quick AI test endpoint - direct SDK call
-app.get('/api/test-ai', async (req, res) => {
-  try {
-    console.log(`[test-ai] Direct call, baseURL=${AI_BASE_URL}`);
-    const completion = await ai.chat.completions.create({
-      model: 'GLM-5-Turbo',
-      messages: [{ role: 'user', content: 'Řekni ahoj jedním slovem' }],
-      max_tokens: 500,
-      temperature: 0.5,
-    });
-    const content = completion.choices[0]?.message?.content || '';
-    const reasoning = completion.choices[0]?.message?.reasoning_content || '';
-    res.json({ ok: true, model: completion.model, content, reasoning: reasoning.substring(0, 100), usage: completion.usage });
-  } catch (err) {
-    res.json({ ok: false, error: `${err.name}: ${err.status||err.code} ${err.message}` });
-  }
-});
 app.get('/api/users', (req, res) => res.json(readDb().users));
 
 app.post('/api/users', (req, res) => {
