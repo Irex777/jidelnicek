@@ -121,7 +121,7 @@ function calcBMR(u) {
 function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
 // ── API: Users ────────────────────────────────────────────────────────
-app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
+app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY), keyPreview: (process.env.ZAI_API_KEY || '').substring(0, 8) + '...' }));
 
 // Quick AI test endpoint
 app.get('/api/test-ai', async (req, res) => {
