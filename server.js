@@ -131,8 +131,9 @@ function runDb(sql, params = []) {
 // ── AI Client ────────────────────────────────────────────────────────
 const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4';
 const AI_MODEL = process.env.AI_MODEL || 'GLM-4.5';
+const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS) || 4000;
 const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
-console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL}`);
+console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS}`);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 const DAY_NAMES_CS = ['Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota', 'Neděle'];
@@ -209,29 +210,17 @@ async function generateDayPlan(user, date, previousMealNames) {
     ? `\nJiž navržená jídla (NEOPAKUJ stejná jména): ${previousMealNames.join(', ')}`
     : '';
 
-  const prompt = `Jsi profesionální výživový poradce. Vytvoř JEDEN den (${dayName}) jídelníčku v JSON.
+  const prompt = `Vytvoř jídelníček pro ${dayName} jako JSON. Uživatel: ${user.name}, ${user.sex === 'male' ? 'muž' : user.sex === 'female' ? 'žena' : '?'}, ${user.age || '?'}let, ${user.weight_current || '?'}kg→${user.weight_goal || '?'}kg. Aktivita: ${user.activity_level || 'moderate'}, diety: ${user.dietary_restrictions || 'žádné'}, alergie: ${user.allergies || 'žádné'}, oblíbené: ${user.favorite_foods || '-'}. Cíl: ${targetCal}kcal.${antiRepeat}
 
-Uživatel: ${user.name}, ${user.sex === 'male' ? 'muž' : user.sex === 'female' ? 'žena' : '?'}, ${user.age || '?'} let, ${user.weight_current || '?'}kg → ${user.weight_goal || '?'}kg
-Aktivita: ${user.activity_level || 'moderate'}, diety: ${user.dietary_restrictions || 'žádné'}
-Alergie: ${user.allergies || 'žádné'}, oblíbená jídla: ${user.favorite_foods || 'neuvedeno'}
-Cíl: ${targetCal} kcal/den, max 30min příprava na jedno jídlo.${antiRepeat}
-
-Vrať POUZE valid JSON bez markdown:
-{"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
-
-Pravidla:
-- Pouze české suroviny dostupné v českých supermarketech
-- Makro split: 30% bílkoviny / 40% sacharidy / 30% tuky
-- Rozložení kalorií: snídaně~22%, dopolední svačina~8%, oběd~30%, odpolední svačina~8%, večeře~32%
-- Každé jídlo musí mít realistický název, ingredience s množstvím a čas přípravy
-- Vrať POUZE JSON, žádný text navíc`;
+Vrať POUZE JSON: {"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["s množstvím"],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
+Pravidla: české suroviny, makro 30P/40C/30F, kalorie rozděleny 22/8/30/8/32%, max 30min příprava. Pouze JSON.`;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     const completion = await ai.chat.completions.create(
-      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 },
+      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: AI_MAX_TOKENS },
       { signal: controller.signal }
     );
     clearTimeout(timeoutId);
