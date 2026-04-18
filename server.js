@@ -117,13 +117,15 @@ function queryOne(sql, params = []) {
 }
 
 function runDb(sql, params = []) {
-  db.run(sql, params);
-  saveDb();
-}
-
-function getLastInsertRowId() {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  stmt.step();
+  stmt.free();
+  // Must capture last_insert_rowid() BEFORE saveDb() because db.export() resets it
   const row = queryOne('SELECT last_insert_rowid() as id');
-  return row ? row.id : null;
+  const lastId = row ? row.id : null;
+  saveDb();
+  return lastId;
 }
 
 // ── AI Client ────────────────────────────────────────────────────────
@@ -267,14 +269,14 @@ app.post('/api/users', (req, res) => {
   const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
   const calories_target = calcCaloriesTarget(tempUser);
 
-  runDb(
+  const newUserId = runDb(
     `INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [d.name, d.sex || null, d.age || null,
      d.weight_current || null, d.weight_goal || null, d.height || null,
      d.activity_level || 'moderate', d.dietary_restrictions || '',
      d.allergies || '', d.favorite_foods || '', calories_target]
   );
-  const user = queryOne('SELECT * FROM users WHERE id = ?', [getLastInsertRowId()]);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [newUserId]);
   res.json(user);
 });
 
@@ -394,13 +396,13 @@ app.post('/api/generate-day', async (req, res) => {
       );
       return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [existing.id])));
     } else {
-      runDb(
+      const newPlanId = runDb(
         `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [userId, date, dayPlan.day || dayName,
          dayPlan.total_calories || 0, dayPlan.total_protein || 0,
          dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
       );
-      return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [getLastInsertRowId()])));
+      return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [newPlanId])));
     }
   } catch (err) {
     console.error(`[AI] generate-day error: ${err.message}`);
@@ -467,13 +469,12 @@ app.post('/api/generate-week', async (req, res) => {
           );
           planId = existing.id;
         } else {
-          runDb(
+          planId = runDb(
             `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [userId, date, dayPlan.day || dayName,
              dayPlan.total_calories || 0, dayPlan.total_protein || 0,
              dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
           );
-          planId = getLastInsertRowId();
         }
 
         const plan = planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]));
