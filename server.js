@@ -1,107 +1,130 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Jídelníček v3 — Day-by-day generation, SQLite, SSE
+// Jídelníček v3 — Day-by-day generation, SQLite (sql.js WASM), SSE
 // ═══════════════════════════════════════════════════════════════════════
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
 const OpenAI = require('openai');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Database (SQLite) ────────────────────────────────────────────────
+// ── Database (sql.js — WASM SQLite) ──────────────────────────────────
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(path.join(dataDir, 'jidelnicek.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const DB_PATH = path.join(dataDir, 'jidelnicek.db');
+let db;
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    sex TEXT DEFAULT NULL,
-    age INTEGER DEFAULT NULL,
-    weight_current REAL DEFAULT NULL,
-    weight_goal REAL DEFAULT NULL,
-    height REAL DEFAULT NULL,
-    activity_level TEXT DEFAULT 'moderate',
-    dietary_restrictions TEXT DEFAULT '',
-    allergies TEXT DEFAULT '',
-    favorite_foods TEXT DEFAULT '',
-    calories_target INTEGER DEFAULT 2000,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
+function saveDb() {
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(DB_PATH, buffer);
+}
 
-  CREATE TABLE IF NOT EXISTS meal_plans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    day_name TEXT DEFAULT '',
-    total_calories INTEGER DEFAULT 0,
-    total_protein INTEGER DEFAULT 0,
-    total_carbs INTEGER DEFAULT 0,
-    total_fat INTEGER DEFAULT 0,
-    meals_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE(user_id, date)
-  );
+async function initDb() {
+  const SQL = await initSqlJs();
+  if (fs.existsSync(DB_PATH)) {
+    const buf = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(buf);
+  } else {
+    db = new SQL.Database();
+  }
 
-  CREATE TABLE IF NOT EXISTS chat_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
+  db.run(`PRAGMA foreign_keys = ON`);
 
-  CREATE TABLE IF NOT EXISTS shopping_lists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date_from TEXT NOT NULL,
-    date_to TEXT NOT NULL,
-    items_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE(user_id, date_from, date_to)
-  );
-`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      sex TEXT DEFAULT NULL,
+      age INTEGER DEFAULT NULL,
+      weight_current REAL DEFAULT NULL,
+      weight_goal REAL DEFAULT NULL,
+      height REAL DEFAULT NULL,
+      activity_level TEXT DEFAULT 'moderate',
+      dietary_restrictions TEXT DEFAULT '',
+      allergies TEXT DEFAULT '',
+      favorite_foods TEXT DEFAULT '',
+      calories_target INTEGER DEFAULT 2000,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
 
-// ── Prepared statements ──────────────────────────────────────────────
-const stmt = {
-  // Users
-  getUsers: db.prepare('SELECT * FROM users ORDER BY id'),
-  getUserById: db.prepare('SELECT * FROM users WHERE id = ?'),
-  createUser: db.prepare(`INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  updateUser: db.prepare(`UPDATE users SET name=?, sex=?, age=?, weight_current=?, weight_goal=?, height=?, activity_level=?, dietary_restrictions=?, allergies=?, favorite_foods=?, calories_target=? WHERE id=?`),
-  deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
+  db.run(`
+    CREATE TABLE IF NOT EXISTS meal_plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      day_name TEXT DEFAULT '',
+      total_calories INTEGER DEFAULT 0,
+      total_protein INTEGER DEFAULT 0,
+      total_carbs INTEGER DEFAULT 0,
+      total_fat INTEGER DEFAULT 0,
+      meals_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(user_id, date)
+    )
+  `);
 
-  // Meal plans
-  getPlanById: db.prepare('SELECT * FROM meal_plans WHERE id = ?'),
-  getPlanByUserDate: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?'),
-  getPlansByUserRange: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date'),
-  getAllPlansByUser: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? ORDER BY date DESC'),
-  insertPlan: db.prepare(`INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-  updatePlan: db.prepare(`UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`),
-  deletePlan: db.prepare('DELETE FROM meal_plans WHERE id = ?'),
-  deletePlansByUserRange: db.prepare('DELETE FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ?'),
+  db.run(`
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
 
-  // Chat
-  getChatByUser: db.prepare('SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 100'),
-  insertChat: db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)'),
+  db.run(`
+    CREATE TABLE IF NOT EXISTS shopping_lists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date_from TEXT NOT NULL,
+      date_to TEXT NOT NULL,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(user_id, date_from, date_to)
+    )
+  `);
 
-  // Shopping
-  getShoppingList: db.prepare('SELECT * FROM shopping_lists WHERE user_id = ? AND date_from = ? AND date_to = ?'),
-  insertShoppingList: db.prepare('INSERT INTO shopping_lists (user_id, date_from, date_to, items_json) VALUES (?, ?, ?, ?)'),
-  updateShoppingList: db.prepare('UPDATE shopping_lists SET items_json=? WHERE id=?'),
-};
+  saveDb();
+}
+
+// ── Query helpers ────────────────────────────────────────────────────
+function queryAll(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const results = [];
+  while (stmt.step()) {
+    results.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return results;
+}
+
+function queryOne(sql, params = []) {
+  const results = queryAll(sql, params);
+  return results[0] || null;
+}
+
+function runDb(sql, params = []) {
+  db.run(sql, params);
+  saveDb();
+}
+
+function getLastInsertRowId() {
+  const row = queryOne('SELECT last_insert_rowid() as id');
+  return row ? row.id : null;
+}
 
 // ── AI Client ────────────────────────────────────────────────────────
 const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
@@ -225,12 +248,12 @@ function extractMealNames(planData) {
 
 // ── API: Health ──────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, db: 'sqlite' });
+  res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, db: 'sqlite-wasm' });
 });
 
 // ── API: Users ───────────────────────────────────────────────────────
 app.get('/api/users', (req, res) => {
-  res.json(stmt.getUsers.all());
+  res.json(queryAll('SELECT * FROM users ORDER BY id'));
 });
 
 app.post('/api/users', (req, res) => {
@@ -241,13 +264,14 @@ app.post('/api/users', (req, res) => {
   const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
   const calories_target = calcCaloriesTarget(tempUser);
 
-  const info = stmt.createUser.run(
-    d.name, d.sex || null, d.age || null,
-    d.weight_current || null, d.weight_goal || null, d.height || null,
-    d.activity_level || 'moderate', d.dietary_restrictions || '',
-    d.allergies || '', d.favorite_foods || '', calories_target
+  runDb(
+    `INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [d.name, d.sex || null, d.age || null,
+     d.weight_current || null, d.weight_goal || null, d.height || null,
+     d.activity_level || 'moderate', d.dietary_restrictions || '',
+     d.allergies || '', d.favorite_foods || '', calories_target]
   );
-  const user = stmt.getUserById.get(info.lastInsertRowid);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [getLastInsertRowId()]);
   res.json(user);
 });
 
@@ -257,18 +281,19 @@ app.put('/api/users/:id', (req, res) => {
   const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
   const calories_target = calcCaloriesTarget(tempUser);
 
-  stmt.updateUser.run(
-    d.name, d.sex || null, d.age || null,
-    d.weight_current || null, d.weight_goal || null, d.height || null,
-    d.activity_level || 'moderate', d.dietary_restrictions || '',
-    d.allergies || '', d.favorite_foods || '', calories_target, id
+  runDb(
+    `UPDATE users SET name=?, sex=?, age=?, weight_current=?, weight_goal=?, height=?, activity_level=?, dietary_restrictions=?, allergies=?, favorite_foods=?, calories_target=? WHERE id=?`,
+    [d.name, d.sex || null, d.age || null,
+     d.weight_current || null, d.weight_goal || null, d.height || null,
+     d.activity_level || 'moderate', d.dietary_restrictions || '',
+     d.allergies || '', d.favorite_foods || '', calories_target, id]
   );
-  const user = stmt.getUserById.get(id);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [id]);
   user ? res.json(user) : res.status(404).json({ error: 'Not found' });
 });
 
 app.delete('/api/users/:id', (req, res) => {
-  stmt.deleteUser.run(parseInt(req.params.id));
+  runDb('DELETE FROM users WHERE id = ?', [parseInt(req.params.id)]);
   res.json({ ok: true });
 });
 
@@ -279,12 +304,12 @@ app.get('/api/plan/:userId', (req, res) => {
   const to = req.query.to;
 
   if (from && to) {
-    const rows = stmt.getPlansByUserRange.all(userId, from, to);
+    const rows = queryAll('SELECT * FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date', [userId, from, to]);
     return res.json(rows.map(planToJSON));
   }
 
   // Return all plans for user
-  const rows = stmt.getAllPlansByUser.all(userId);
+  const rows = queryAll('SELECT * FROM meal_plans WHERE user_id = ? ORDER BY date DESC', [userId]);
   res.json(rows.map(planToJSON));
 });
 
@@ -292,7 +317,7 @@ app.get('/api/plan/:userId', (req, res) => {
 app.put('/api/plan/:planId', (req, res) => {
   const planId = parseInt(req.params.planId);
   const d = req.body;
-  const existing = stmt.getPlanById.get(planId);
+  const existing = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
   if (!existing) return res.status(404).json({ error: 'Plan not found' });
 
   let meals = JSON.parse(existing.meals_json);
@@ -307,21 +332,22 @@ app.put('/api/plan/:planId', (req, res) => {
     totalF += meal.fat || 0;
   }
 
-  stmt.updatePlan.run(
-    d.day_name || existing.day_name,
-    d.total_calories || totalCal,
-    d.total_protein || totalP,
-    d.total_carbs || totalC,
-    d.total_fat || totalF,
-    JSON.stringify(meals),
-    planId
+  runDb(
+    `UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`,
+    [d.day_name || existing.day_name,
+     d.total_calories || totalCal,
+     d.total_protein || totalP,
+     d.total_carbs || totalC,
+     d.total_fat || totalF,
+     JSON.stringify(meals),
+     planId]
   );
-  res.json(planToJSON(stmt.getPlanById.get(planId)));
+  res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId])));
 });
 
 // ── API: Delete a plan ───────────────────────────────────────────────
 app.delete('/api/plan/:planId', (req, res) => {
-  stmt.deletePlan.run(parseInt(req.params.planId));
+  runDb('DELETE FROM meal_plans WHERE id = ?', [parseInt(req.params.planId)]);
   res.json({ ok: true });
 });
 
@@ -330,14 +356,14 @@ app.post('/api/generate-day', async (req, res) => {
   const { userId, date } = req.body;
   if (!userId || !date) return res.status(400).json({ error: 'userId and date required' });
 
-  const user = stmt.getUserById.get(userId);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // Get previous 3-4 days of meal names for anti-repetition
   const prevDays = [];
   for (let i = 1; i <= 4; i++) {
     const prevDate = addDays(date, -i);
-    const prevPlan = stmt.getPlanByUserDate.get(userId, prevDate);
+    const prevPlan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, prevDate]);
     if (prevPlan) {
       prevDays.push(...extractMealNames(JSON.parse(prevPlan.meals_json)));
     }
@@ -351,25 +377,27 @@ app.post('/api/generate-day', async (req, res) => {
     const mealsJson = JSON.stringify(dayPlan.meals);
 
     // Upsert
-    const existing = stmt.getPlanByUserDate.get(userId, date);
+    const existing = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
     if (existing) {
-      stmt.updatePlan.run(
-        dayPlan.day || dayName,
-        dayPlan.total_calories || 0,
-        dayPlan.total_protein || 0,
-        dayPlan.total_carbs || 0,
-        dayPlan.total_fat || 0,
-        mealsJson,
-        existing.id
+      runDb(
+        `UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`,
+        [dayPlan.day || dayName,
+         dayPlan.total_calories || 0,
+         dayPlan.total_protein || 0,
+         dayPlan.total_carbs || 0,
+         dayPlan.total_fat || 0,
+         mealsJson,
+         existing.id]
       );
-      return res.json(planToJSON(stmt.getPlanById.get(existing.id)));
+      return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [existing.id])));
     } else {
-      const info = stmt.insertPlan.run(
-        userId, date, dayPlan.day || dayName,
-        dayPlan.total_calories || 0, dayPlan.total_protein || 0,
-        dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson
+      runDb(
+        `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [userId, date, dayPlan.day || dayName,
+         dayPlan.total_calories || 0, dayPlan.total_protein || 0,
+         dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
       );
-      return res.json(planToJSON(stmt.getPlanById.get(info.lastInsertRowid)));
+      return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [getLastInsertRowId()])));
     }
   } catch (err) {
     console.error(`[AI] generate-day error: ${err.message}`);
@@ -382,7 +410,7 @@ app.post('/api/generate-week', async (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
 
-  const user = stmt.getUserById.get(userId);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // SSE headers
@@ -405,7 +433,7 @@ app.post('/api/generate-week', async (req, res) => {
   const prevMealNames = [];
   for (let i = 1; i <= 4; i++) {
     const prevDate = addDays(weekStart, -i);
-    const prevPlan = stmt.getPlanByUserDate.get(userId, prevDate);
+    const prevPlan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, prevDate]);
     if (prevPlan) {
       prevMealNames.push(...extractMealNames(JSON.parse(prevPlan.meals_json)));
     }
@@ -421,29 +449,31 @@ app.post('/api/generate-week', async (req, res) => {
         const mealsJson = JSON.stringify(dayPlan.meals);
 
         // Upsert into DB
-        const existing = stmt.getPlanByUserDate.get(userId, date);
+        const existing = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
         let planId;
         if (existing) {
-          stmt.updatePlan.run(
-            dayPlan.day || dayName,
-            dayPlan.total_calories || 0,
-            dayPlan.total_protein || 0,
-            dayPlan.total_carbs || 0,
-            dayPlan.total_fat || 0,
-            mealsJson,
-            existing.id
+          runDb(
+            `UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`,
+            [dayPlan.day || dayName,
+             dayPlan.total_calories || 0,
+             dayPlan.total_protein || 0,
+             dayPlan.total_carbs || 0,
+             dayPlan.total_fat || 0,
+             mealsJson,
+             existing.id]
           );
           planId = existing.id;
         } else {
-          const info = stmt.insertPlan.run(
-            userId, date, dayPlan.day || dayName,
-            dayPlan.total_calories || 0, dayPlan.total_protein || 0,
-            dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson
+          runDb(
+            `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, date, dayPlan.day || dayName,
+             dayPlan.total_calories || 0, dayPlan.total_protein || 0,
+             dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
           );
-          planId = info.lastInsertRowid;
+          planId = getLastInsertRowId();
         }
 
-        const plan = planToJSON(stmt.getPlanById.get(planId));
+        const plan = planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]));
         res.write(`data: ${JSON.stringify({ type: 'day_done', day: idx, name: dayName, date, plan })}\n\n`);
         console.log(`[AI] Week day ${idx + 1}/7 done: ${dayName} ${dayPlan.total_calories} kcal`);
         return plan;
@@ -469,7 +499,7 @@ app.post('/api/generate-week', async (req, res) => {
 // ── API: Chat ────────────────────────────────────────────────────────
 app.get('/api/chat/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
-  const rows = stmt.getChatByUser.all(userId);
+  const rows = queryAll('SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 100', [userId]);
   res.json(rows.reverse());
 });
 
@@ -477,19 +507,19 @@ app.post('/api/chat', async (req, res) => {
   const { userId, message, planDate } = req.body;
   if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
 
-  const user = stmt.getUserById.get(userId);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // Save user message
-  stmt.insertChat.run(userId, 'user', message);
+  runDb('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)', [userId, 'user', message]);
 
   // Get recent history
-  const history = stmt.getChatByUser.all(userId).slice(0, 20).reverse();
+  const history = queryAll('SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 100', [userId]).slice(0, 20).reverse();
 
   // Get current plan if planDate provided
   let planContext = '';
   if (planDate) {
-    const plan = stmt.getPlanByUserDate.get(userId, planDate);
+    const plan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, planDate]);
     if (plan) {
       planContext = `\nAktuální plán pro ${planDate}:\n${plan.meals_json}`;
     }
@@ -528,7 +558,7 @@ Odpovídej v češtině. Pokud uživatel žádá změnu jídelníčku, navrhni k
     }
 
     // Save assistant message
-    stmt.insertChat.run(userId, 'assistant', fullContent);
+    runDb('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)', [userId, 'assistant', fullContent]);
     res.write(`data: ${JSON.stringify({ type: 'done', message: fullContent })}\n\n`);
     res.end();
   } catch (err) {
@@ -546,11 +576,11 @@ app.get('/api/shopping-list/:userId', (req, res) => {
   if (!from || !to) return res.status(400).json({ error: 'from and to query params required' });
 
   // Check cached
-  const cached = stmt.getShoppingList.get(userId, from, to);
+  const cached = queryOne('SELECT * FROM shopping_lists WHERE user_id = ? AND date_from = ? AND date_to = ?', [userId, from, to]);
   if (cached) return res.json({ items: JSON.parse(cached.items_json), from, to });
 
   // Get plans in range
-  const plans = stmt.getPlansByUserRange.all(userId, from, to);
+  const plans = queryAll('SELECT * FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date', [userId, from, to]);
   if (!plans.length) return res.json({ items: [], from, to });
 
   const parseIng = (s) => {
@@ -633,7 +663,7 @@ app.get('/api/shopping-list/:userId', (req, res) => {
   }).sort((a, b) => a.category.localeCompare(b.category, 'cs') || a.name.localeCompare(b.name, 'cs'));
 
   // Cache
-  stmt.insertShoppingList.run(userId, from, to, JSON.stringify(list));
+  runDb('INSERT INTO shopping_lists (user_id, date_from, date_to, items_json) VALUES (?, ?, ?, ?)', [userId, from, to, JSON.stringify(list)]);
   res.json({ items: list, from, to });
 });
 
@@ -642,8 +672,14 @@ app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 // ── Start ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Jídelníček v3 running on :${PORT} (SQLite, day-by-day, parallel week)`);
-});
+
+async function main() {
+  await initDb();
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Jídelníček v3 running on :${PORT} (SQLite/sql.js WASM, day-by-day, parallel week)`);
+  });
+}
+
+main().catch(err => { console.error('Startup failed:', err); process.exit(1); });
 
 process.on('uncaughtException', err => console.error('Uncaught:', err.message));
