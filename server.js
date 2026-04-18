@@ -215,12 +215,17 @@ async function generateDayPlan(user, date, previousMealNames) {
 Vrať POUZE JSON: {"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["s množstvím"],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
 Pravidla: české suroviny, makro 30P/40C/30F, kalorie rozděleny 22/8/30/8/32%, max 30min příprava. Pouze JSON.`;
 
+  const messages = [
+    { role: 'system', content: 'Output directly. No reasoning. No thinking. Just respond with the JSON immediately.' },
+    { role: 'user', content: prompt }
+  ];
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     const completion = await ai.chat.completions.create(
-      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: AI_MAX_TOKENS },
+      { model: AI_MODEL, messages, temperature: 0.8, max_tokens: AI_MAX_TOKENS },
       { signal: controller.signal }
     );
     clearTimeout(timeoutId);
