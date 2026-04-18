@@ -1,391 +1,574 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Jídelníček v3 — Day-by-day generation, SQLite, SSE
+// ═══════════════════════════════════════════════════════════════════════
+
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const Database = require('better-sqlite3');
 const OpenAI = require('openai');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Database (simple JSON file) ───────────────────────────────────────
+// ── Database (SQLite) ────────────────────────────────────────────────
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-const dbFile = path.join(dataDir, 'db.json');
-const defaults = { users: [], meal_plans: [], chat_messages: [], shopping_lists: [], _nextId: 1 };
 
-function readDb() {
-  try {
-    if (!fs.existsSync(dbFile)) return JSON.parse(JSON.stringify(defaults));
-    const d = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
-    for (const k of Object.keys(defaults)) { if (!(k in d)) d[k] = defaults[k]; }
-    return d;
-  } catch { return JSON.parse(JSON.stringify(defaults)); }
-}
-function writeDb(data) { fs.writeFileSync(dbFile, JSON.stringify(data, null, 2)); }
-function genId() { const d = readDb(); const id = (d._nextId || 1); d._nextId = id + 1; writeDb(d); return id; }
-function push(collection, item) { const d = readDb(); d[collection].push(item); writeDb(d); }
-function find(collection, fn) { return readDb()[collection].find(fn) || null; }
-function filter(collection, fn) { return readDb()[collection].filter(fn); }
-function updateOne(collection, fn, updates) { const d = readDb(); const idx = d[collection].findIndex(fn); if (idx >= 0) { Object.assign(d[collection][idx], updates); writeDb(d); return d[collection][idx]; } return null; }
-function removeWhere(collection, fn) { const d = readDb(); d[collection] = d[collection].filter((item, i) => !fn(item, i)); writeDb(d); }
+const db = new Database(path.join(dataDir, 'jidelnicek.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-// ── AI Client ─────────────────────────────────────────────────────────
-const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-// Model config: { name, timeout (ms), retries }
-// GLM-5-Turbo uses reasoning tokens — wastes budget on structured JSON output
-// GLM-4.5-Air is the best workhorse for generation (fast, reliable JSON)
-// GLM-4.7 as fallback
-const AI_MODEL_CONFIG = [
-  { name: 'GLM-4.5-Air', timeout: 60000, retries: 2 },   // 1min — primary, great for JSON
-  { name: 'GLM-4.7', timeout: 60000, retries: 1 },       // fallback
-];
-const ai = new OpenAI({
-  apiKey: process.env.ZAI_API_KEY,
-  baseURL: AI_BASE_URL,
-});
-console.log(`[AI] models=${AI_MODEL_CONFIG.map(m=>m.name).join(',')} baseURL=${AI_BASE_URL}`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    sex TEXT DEFAULT NULL,
+    age INTEGER DEFAULT NULL,
+    weight_current REAL DEFAULT NULL,
+    weight_goal REAL DEFAULT NULL,
+    height REAL DEFAULT NULL,
+    activity_level TEXT DEFAULT 'moderate',
+    dietary_restrictions TEXT DEFAULT '',
+    allergies TEXT DEFAULT '',
+    favorite_foods TEXT DEFAULT '',
+    calories_target INTEGER DEFAULT 2000,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
 
-// Try models in order with per-model timeout and retries
-async function aiGenerate(messages, maxTokens, temperature) {
-  const allErrors = [];
-  for (const cfg of AI_MODEL_CONFIG) {
-    for (let attempt = 1; attempt <= cfg.retries; attempt++) {
-      try {
-        console.log(`[AI] Trying ${cfg.name} (attempt ${attempt}/${cfg.retries}, timeout ${cfg.timeout}ms)`);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), cfg.timeout);
-        const completion = await ai.chat.completions.create(
-          { model: cfg.name, messages, temperature, max_tokens: maxTokens },
-          { signal: controller.signal }
-        );
-        clearTimeout(timeoutId);
-        const content = (completion.choices[0].message.content || '').trim();
-        if (!content) {
-          console.log(`[AI] ${cfg.name} returned empty content (likely all reasoning tokens), trying next model...`);
-          break; // skip retries for this model, move to next
-        }
-        console.log(`[AI] ${cfg.name} returned ${content.length} chars (attempt ${attempt})`);
-        return { content, model: cfg.name };
-      } catch (err) {
-        const errMsg = String(err?.constructor?.name) + ': ' + (err?.status || '') + ' ' + (err?.message || err?.code || '') + ' | ' + JSON.stringify(err).substring(0, 300);
-        console.log(`[AI] ${cfg.name} attempt ${attempt} failed: ${errMsg}`);
-        allErrors.push(errMsg.substring(0, 200));
-        if (attempt < cfg.retries) {
-          await new Promise(r => setTimeout(r, 2000 * attempt)); // backoff
-        }
-      }
-    }
-  }
-  throw new Error(allErrors.join(' | '));
-}
+  CREATE TABLE IF NOT EXISTS meal_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    day_name TEXT DEFAULT '',
+    total_calories INTEGER DEFAULT 0,
+    total_protein INTEGER DEFAULT 0,
+    total_carbs INTEGER DEFAULT 0,
+    total_fat INTEGER DEFAULT 0,
+    meals_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, date)
+  );
 
-// Fast model for chat (short responses — GLM-5-Turbo is great for this)
-const CHAT_MODEL_CONFIG = [
-  { name: 'GLM-5-Turbo', timeout: 30000, retries: 2 },   // 30s — fast for short responses
-  { name: 'GLM-4.5-Air', timeout: 60000, retries: 1 },   // fallback
-];
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 
-async function aiChatGenerate(messages, maxTokens, temperature) {
-  for (const cfg of CHAT_MODEL_CONFIG) {
-    for (let attempt = 1; attempt <= cfg.retries; attempt++) {
-      try {
-        console.log(`[AI-Chat] Trying ${cfg.name} (attempt ${attempt}/${cfg.retries})`);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), cfg.timeout);
-        const completion = await ai.chat.completions.create(
-          { model: cfg.name, messages, temperature, max_tokens: maxTokens },
-          { signal: controller.signal }
-        );
-        clearTimeout(timeoutId);
-        const content = (completion.choices[0].message.content || '').trim();
-        if (!content) { break; }
-        console.log(`[AI-Chat] ${cfg.name} returned ${content.length} chars`);
-        return { content, model: cfg.name };
-      } catch (err) {
-        console.log(`[AI-Chat] ${cfg.name} attempt ${attempt} failed: ${err.message}`);
-        if (attempt < cfg.retries) { await new Promise(r => setTimeout(r, 2000 * attempt)); }
-      }
-    }
-  }
-  throw new Error('Chat AI failed. Please try again.');
-}
+  CREATE TABLE IF NOT EXISTS shopping_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    date_from TEXT NOT NULL,
+    date_to TEXT NOT NULL,
+    items_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, date_from, date_to)
+  );
+`);
 
-// ── Localization ──────────────────────────────────────────────────────
-const LOCALES = {
-  cs: { dayNames: ['Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota','Neděle'], mealTypes: { breakfast:'Snídaně', morning_snack:'Dop. svačina', lunch:'Oběd', afternoon_snack:'Odp. svačina', dinner:'Večeře' } },
-  en: { dayNames: ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'], mealTypes: { breakfast:'Breakfast', morning_snack:'Morning snack', lunch:'Lunch', afternoon_snack:'Afternoon snack', dinner:'Dinner' } },
+// ── Prepared statements ──────────────────────────────────────────────
+const stmt = {
+  // Users
+  getUsers: db.prepare('SELECT * FROM users ORDER BY id'),
+  getUserById: db.prepare('SELECT * FROM users WHERE id = ?'),
+  createUser: db.prepare(`INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  updateUser: db.prepare(`UPDATE users SET name=?, sex=?, age=?, weight_current=?, weight_goal=?, height=?, activity_level=?, dietary_restrictions=?, allergies=?, favorite_foods=?, calories_target=? WHERE id=?`),
+  deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
+
+  // Meal plans
+  getPlanById: db.prepare('SELECT * FROM meal_plans WHERE id = ?'),
+  getPlanByUserDate: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?'),
+  getPlansByUserRange: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date'),
+  getAllPlansByUser: db.prepare('SELECT * FROM meal_plans WHERE user_id = ? ORDER BY date DESC'),
+  insertPlan: db.prepare(`INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+  updatePlan: db.prepare(`UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`),
+  deletePlan: db.prepare('DELETE FROM meal_plans WHERE id = ?'),
+  deletePlansByUserRange: db.prepare('DELETE FROM meal_plans WHERE user_id = ? AND date >= ? AND date <= ?'),
+
+  // Chat
+  getChatByUser: db.prepare('SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 100'),
+  insertChat: db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)'),
+
+  // Shopping
+  getShoppingList: db.prepare('SELECT * FROM shopping_lists WHERE user_id = ? AND date_from = ? AND date_to = ?'),
+  insertShoppingList: db.prepare('INSERT INTO shopping_lists (user_id, date_from, date_to, items_json) VALUES (?, ?, ?, ?)'),
+  updateShoppingList: db.prepare('UPDATE shopping_lists SET items_json=? WHERE id=?'),
 };
-function getLocale(lang) { return LOCALES[lang] || LOCALES.cs; }
 
-// ── Helpers ───────────────────────────────────────────────────────────
+// ── AI Client ────────────────────────────────────────────────────────
+const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const AI_MODEL = 'GLM-4.5-Air';
+const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
+console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL}`);
+
+// ── Helpers ──────────────────────────────────────────────────────────
+const DAY_NAMES_CS = ['Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota', 'Neděle'];
+const MEAL_TYPES_CS = { breakfast: 'Snídaně', morning_snack: 'Dop. svačina', lunch: 'Oběd', afternoon_snack: 'Odp. svačina', dinner: 'Večeře' };
+
 function calcBMR(u) {
   if (!u.weight_current || !u.height || !u.age || !u.sex) return 2000;
-  return u.sex === 'male' ? Math.round(10*u.weight_current + 6.25*u.height - 5*u.age + 5) : Math.round(10*u.weight_current + 6.25*u.height - 5*u.age - 161);
+  return u.sex === 'male'
+    ? Math.round(10 * u.weight_current + 6.25 * u.height - 5 * u.age + 5)
+    : Math.round(10 * u.weight_current + 6.25 * u.height - 5 * u.age - 161);
 }
-function calcTDEE(bmr, level) { return Math.round(bmr * ({sedentary:1.2,light:1.375,moderate:1.55,active:1.725,very_active:1.9}[level]||1.55)); }
 
-// ── API: Users ────────────────────────────────────────────────────────
-app.get('/api/debug', (req, res) => res.json({ models: AI_MODEL_CONFIG.map(m => ({ name: m.name, timeout: m.timeout, retries: m.retries })), baseURL: AI_BASE_URL, hasKey: !!(process.env.ZAI_API_KEY) }));
+function calcTDEE(bmr, level) {
+  const multipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, very_active: 1.9 };
+  return Math.round(bmr * (multipliers[level] || 1.55));
+}
 
-app.get('/api/users', (req, res) => res.json(readDb().users));
+function calcCaloriesTarget(u) {
+  const bmr = calcBMR(u);
+  const tdee = calcTDEE(bmr, u.activity_level || 'moderate');
+  return (u.weight_goal && u.weight_current && u.weight_goal < u.weight_current) ? tdee - 500 : tdee;
+}
+
+function getWeekStart(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  d.setDate(diff);
+  return d.toISOString().split('T')[0];
+}
+
+function addDays(dateStr, n) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + n);
+  return d.toISOString().split('T')[0];
+}
+
+function getDayIndex(dateStr) {
+  const d = new Date(dateStr);
+  const jsDay = d.getDay(); // 0=Sun, 1=Mon...6=Sat
+  return jsDay === 0 ? 6 : jsDay - 1; // Convert to 0=Mon...6=Sun
+}
+
+function parseDayPlan(raw) {
+  let content = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+  const jsonStart = content.indexOf('{');
+  if (jsonStart > 0) content = content.substring(jsonStart);
+  return JSON.parse(content);
+}
+
+function planToJSON(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    date: row.date,
+    day_name: row.day_name,
+    total_calories: row.total_calories,
+    total_protein: row.total_protein,
+    total_carbs: row.total_carbs,
+    total_fat: row.total_fat,
+    meals: JSON.parse(row.meals_json),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+// ── AI Generation (single day) ──────────────────────────────────────
+async function generateDayPlan(user, date, previousMealNames) {
+  const dayIdx = getDayIndex(date);
+  const dayName = DAY_NAMES_CS[dayIdx];
+  const targetCal = user.calories_target || 2000;
+
+  const antiRepeat = previousMealNames.length > 0
+    ? `\nJiž navržená jídla (NEOPAKUJ stejná jména): ${previousMealNames.join(', ')}`
+    : '';
+
+  const prompt = `Jsi profesionální výživový poradce. Vytvoř JEDEN den (${dayName}) jídelníčku v JSON.
+
+Uživatel: ${user.name}, ${user.sex === 'male' ? 'muž' : user.sex === 'female' ? 'žena' : '?'}, ${user.age || '?'} let, ${user.weight_current || '?'}kg → ${user.weight_goal || '?'}kg
+Aktivita: ${user.activity_level || 'moderate'}, diety: ${user.dietary_restrictions || 'žádné'}
+Alergie: ${user.allergies || 'žádné'}, oblíbená jídla: ${user.favorite_foods || 'neuvedeno'}
+Cíl: ${targetCal} kcal/den, max 30min příprava na jedno jídlo.${antiRepeat}
+
+Vrať POUZE valid JSON bez markdown:
+{"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
+
+Pravidla:
+- Pouze české suroviny dostupné v českých supermarketech
+- Makro split: 30% bílkoviny / 40% sacharidy / 30% tuky
+- Rozložení kalorií: snídaně~22%, dopolední svačina~8%, oběd~30%, odpolední svačina~8%, večeře~32%
+- Každé jídlo musí mít realistický název, ingredience s množstvím a čas přípravy
+- Vrať POUZE JSON, žádný text navíc`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const completion = await ai.chat.completions.create(
+      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 3000 },
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+    const raw = (completion.choices[0].message.content || '').trim();
+    return parseDayPlan(raw);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
+
+function extractMealNames(planData) {
+  if (!planData || !planData.meals) return [];
+  return Object.values(planData.meals).map(m => m.name).filter(Boolean);
+}
+
+// ── API: Health ──────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, db: 'sqlite' });
+});
+
+// ── API: Users ───────────────────────────────────────────────────────
+app.get('/api/users', (req, res) => {
+  res.json(stmt.getUsers.all());
+});
 
 app.post('/api/users', (req, res) => {
   const d = req.body;
-  const bmr = calcBMR(d);
-  const tdee = calcTDEE(bmr, d.activity_level || 'moderate');
-  const calories_target = d.weight_goal && d.weight_current && d.weight_goal < d.weight_current ? tdee - 500 : tdee;
-  const user = { id: genId(), name: d.name, locale: d.locale||'cs', weight_current: d.weight_current, weight_goal: d.weight_goal, height: d.height, age: d.age, sex: d.sex, activity_level: d.activity_level||'moderate', dietary_restrictions: d.dietary_restrictions||'', calories_target, created_at: new Date().toISOString() };
-  push('users', user);
+  if (!d.name) return res.status(400).json({ error: 'Name is required' });
+
+  // Calculate calories target
+  const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
+  const calories_target = calcCaloriesTarget(tempUser);
+
+  const info = stmt.createUser.run(
+    d.name, d.sex || null, d.age || null,
+    d.weight_current || null, d.weight_goal || null, d.height || null,
+    d.activity_level || 'moderate', d.dietary_restrictions || '',
+    d.allergies || '', d.favorite_foods || '', calories_target
+  );
+  const user = stmt.getUserById.get(info.lastInsertRowid);
   res.json(user);
 });
 
 app.put('/api/users/:id', (req, res) => {
   const d = req.body;
-  const bmr = calcBMR(d);
-  const tdee = calcTDEE(bmr, d.activity_level || 'moderate');
-  d.calories_target = d.weight_goal && d.weight_current && d.weight_goal < d.weight_current ? tdee - 500 : tdee;
-  const u = updateOne('users', u => u.id === parseInt(req.params.id), d);
-  u ? res.json(u) : res.status(404).json({ error: 'Not found' });
+  const id = parseInt(req.params.id);
+  const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
+  const calories_target = calcCaloriesTarget(tempUser);
+
+  stmt.updateUser.run(
+    d.name, d.sex || null, d.age || null,
+    d.weight_current || null, d.weight_goal || null, d.height || null,
+    d.activity_level || 'moderate', d.dietary_restrictions || '',
+    d.allergies || '', d.favorite_foods || '', calories_target, id
+  );
+  const user = stmt.getUserById.get(id);
+  user ? res.json(user) : res.status(404).json({ error: 'Not found' });
 });
 
 app.delete('/api/users/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  removeWhere('users', u => u.id === id);
-  removeWhere('meal_plans', p => p.user_id === id);
-  removeWhere('chat_messages', m => m.user_id === id);
-  removeWhere('shopping_lists', s => s.user_id === id);
+  stmt.deleteUser.run(parseInt(req.params.id));
   res.json({ ok: true });
 });
 
-// ── API: Meal Plans ──────────────────────────────────────────────────
-app.get('/api/plans/:userId/:weekStart', (req, res) => {
-  res.json(find('meal_plans', p => p.user_id === parseInt(req.params.userId) && p.week_start === req.params.weekStart) || null);
-});
+// ── API: Get plans ───────────────────────────────────────────────────
+app.get('/api/plan/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const from = req.query.from;
+  const to = req.query.to;
 
-app.post('/api/plans', (req, res) => {
-  const { user_id, week_start, meals } = req.body;
-  const existing = find('meal_plans', p => p.user_id === user_id && p.week_start === week_start);
-  if (existing) {
-    updateOne('meal_plans', p => p.user_id === user_id && p.week_start === week_start, { meals, updated_at: new Date().toISOString() });
-  } else {
-    push('meal_plans', { id: genId(), user_id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+  if (from && to) {
+    const rows = stmt.getPlansByUserRange.all(userId, from, to);
+    return res.json(rows.map(planToJSON));
   }
+
+  // Return all plans for user
+  const rows = stmt.getAllPlansByUser.all(userId);
+  res.json(rows.map(planToJSON));
+});
+
+// ── API: Edit a meal plan ────────────────────────────────────────────
+app.put('/api/plan/:planId', (req, res) => {
+  const planId = parseInt(req.params.planId);
+  const d = req.body;
+  const existing = stmt.getPlanById.get(planId);
+  if (!existing) return res.status(404).json({ error: 'Plan not found' });
+
+  let meals = JSON.parse(existing.meals_json);
+  if (d.meals) meals = d.meals;
+
+  // Recalculate totals
+  let totalCal = 0, totalP = 0, totalC = 0, totalF = 0;
+  for (const meal of Object.values(meals)) {
+    totalCal += meal.calories || 0;
+    totalP += meal.protein || 0;
+    totalC += meal.carbs || 0;
+    totalF += meal.fat || 0;
+  }
+
+  stmt.updatePlan.run(
+    d.day_name || existing.day_name,
+    d.total_calories || totalCal,
+    d.total_protein || totalP,
+    d.total_carbs || totalC,
+    d.total_fat || totalF,
+    JSON.stringify(meals),
+    planId
+  );
+  res.json(planToJSON(stmt.getPlanById.get(planId)));
+});
+
+// ── API: Delete a plan ───────────────────────────────────────────────
+app.delete('/api/plan/:planId', (req, res) => {
+  stmt.deletePlan.run(parseInt(req.params.planId));
   res.json({ ok: true });
 });
 
-app.delete('/api/plans/:userId/:weekStart', (req, res) => {
-  removeWhere('meal_plans', p => p.user_id === parseInt(req.params.userId) && p.week_start === req.params.weekStart);
-  removeWhere('shopping_lists', s => s.user_id === parseInt(req.params.userId) && s.week_start === req.params.weekStart);
-  res.json({ ok: true });
-});
+// ── API: Generate single day ─────────────────────────────────────────
+app.post('/api/generate-day', async (req, res) => {
+  const { userId, date } = req.body;
+  if (!userId || !date) return res.status(400).json({ error: 'userId and date required' });
 
-// ── API: Generate with AI (day-by-day, each saved immediately) ────────
-const pendingJobs = {};
-
-app.post('/api/generate/:userId', async (req, res) => {
-  const { week_start } = req.body;
-  const user = find('users', u => u.id === parseInt(req.params.userId));
+  const user = stmt.getUserById.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  // Check if plan already exists for this week — don't regenerate
-  const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-  if (existing && existing.meals && Object.keys(existing.meals).length >= 7) {
-    return res.json({ jobId: null, status: 'exists', meals: existing.meals });
+  // Get previous 3-4 days of meal names for anti-repetition
+  const prevDays = [];
+  for (let i = 1; i <= 4; i++) {
+    const prevDate = addDays(date, -i);
+    const prevPlan = stmt.getPlanByUserDate.get(userId, prevDate);
+    if (prevPlan) {
+      prevDays.push(...extractMealNames(JSON.parse(prevPlan.meals_json)));
+    }
   }
 
-  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  pendingJobs[jobId] = { status: 'pending', progress: 0, total: 7, result: null, error: null, partialMeals: {} };
-  res.json({ jobId, status: 'pending' });
+  try {
+    const dayPlan = await generateDayPlan(user, date, prevDays);
+    const dayIdx = getDayIndex(date);
+    const dayName = DAY_NAMES_CS[dayIdx];
 
-  // Run day-by-day generation in background
-  (async () => {
-    const loc = getLocale(user.locale);
-    const targetCal = user.calories_target || 2000;
-    const meals = {};
+    const mealsJson = JSON.stringify(dayPlan.meals);
 
-    // Restore any partial progress from existing plan
-    if (existing && existing.meals) {
-      Object.assign(meals, existing.meals);
+    // Upsert
+    const existing = stmt.getPlanByUserDate.get(userId, date);
+    if (existing) {
+      stmt.updatePlan.run(
+        dayPlan.day || dayName,
+        dayPlan.total_calories || 0,
+        dayPlan.total_protein || 0,
+        dayPlan.total_carbs || 0,
+        dayPlan.total_fat || 0,
+        mealsJson,
+        existing.id
+      );
+      return res.json(planToJSON(stmt.getPlanById.get(existing.id)));
+    } else {
+      const info = stmt.insertPlan.run(
+        userId, date, dayPlan.day || dayName,
+        dayPlan.total_calories || 0, dayPlan.total_protein || 0,
+        dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson
+      );
+      return res.json(planToJSON(stmt.getPlanById.get(info.lastInsertRowid)));
     }
+  } catch (err) {
+    console.error(`[AI] generate-day error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
-    const daysToGenerate = [];
-    for (let i = 0; i < 7; i++) {
-      if (!meals[i]) daysToGenerate.push(i);
+// ── API: Generate week (parallel, SSE) ───────────────────────────────
+app.post('/api/generate-week', async (req, res) => {
+  const { userId, weekStart } = req.body;
+  if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+
+  const user = stmt.getUserById.get(userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  res.write(`data: ${JSON.stringify({ type: 'start', total: 7 })}\n\n`);
+
+  // Build array of 7 dates
+  const dates = [];
+  for (let i = 0; i < 7; i++) {
+    dates.push(addDays(weekStart, i));
+  }
+
+  // Get previous meal names for anti-repetition
+  const prevMealNames = [];
+  for (let i = 1; i <= 4; i++) {
+    const prevDate = addDays(weekStart, -i);
+    const prevPlan = stmt.getPlanByUserDate.get(userId, prevDate);
+    if (prevPlan) {
+      prevMealNames.push(...extractMealNames(JSON.parse(prevPlan.meals_json)));
     }
+  }
 
-    console.log(`[AI] Starting day-by-day generation for user ${user.id}, ${daysToGenerate.length} days to generate`);
+  // Fire all 7 in parallel
+  const promises = dates.map((date, idx) => {
+    const dayIdx = getDayIndex(date);
+    const dayName = DAY_NAMES_CS[dayIdx];
 
-    for (const dayIdx of daysToGenerate) {
-      const dayName = loc.dayNames[dayIdx];
-      // Build context from already-generated days so meals don't repeat
-      const prevMeals = Object.values(meals).map(d => d.meals ? Object.values(d.meals).map(m => m.name).join(', ') : '').filter(Boolean);
-      const contextStr = prevMeals.length > 0 ? `\nJiž navržená jídla (NEOPAKUJ): ${prevMeals.join(' | ')}` : '';
+    return generateDayPlan(user, date, prevMealNames)
+      .then(dayPlan => {
+        const mealsJson = JSON.stringify(dayPlan.meals);
 
-      const prompt = `Jsi profesionální výživový poradce. Vytvoř JEDEN den (${dayName}) jídelníčku v JSON.
-
-Uživatel: ${user.name}, ${user.sex==='male'?'muž':user.sex==='female'?'žena':'?'}, ${user.age||'?'} let, ${user.weight_current||'?'}kg → ${user.weight_goal||'?'}kg
-Aktivita: ${user.activity_level||'moderate'}, diety: ${user.dietary_restrictions||'žádné'}
-Cíl: ${targetCal} kcal/den, max 30min příprava.${contextStr}
-
-Vrať POUZE valid JSON bez markdown:
-{"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"...","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["položka s množstvím"],"prep":"stručný postup"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
-
-Pravidla: české suroviny, 30% bílkoviny/40% sacharidy/30% tuky. Rozložení: snídaně~22%, dop. svačina~8%, oběd~30%, odp. svačina~8%, večeře~32%.`;
-
-      try {
-        console.log(`[AI] Generating day ${dayIdx+1}/7: ${dayName}`);
-        const { content: rawContent, model } = await aiGenerate(
-          [{ role: 'user', content: prompt }], 4000, 0.8
-        );
-        let content = rawContent.replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```\s*$/i,'').trim();
-        const dayPlan = JSON.parse(content);
-
-        meals[dayIdx] = {
-          day: dayPlan.day || dayName,
-          total_calories: dayPlan.total_calories,
-          total_protein: dayPlan.total_protein,
-          total_carbs: dayPlan.total_carbs,
-          total_fat: dayPlan.total_fat,
-          meals: dayPlan.meals
-        };
-
-        // Save progress after EACH day — survives crashes
-        const existingPlan = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-        if (existingPlan) {
-          updateOne('meal_plans', p => p.id === existingPlan.id, { meals, updated_at: new Date().toISOString() });
+        // Upsert into DB
+        const existing = stmt.getPlanByUserDate.get(userId, date);
+        let planId;
+        if (existing) {
+          stmt.updatePlan.run(
+            dayPlan.day || dayName,
+            dayPlan.total_calories || 0,
+            dayPlan.total_protein || 0,
+            dayPlan.total_carbs || 0,
+            dayPlan.total_fat || 0,
+            mealsJson,
+            existing.id
+          );
+          planId = existing.id;
         } else {
-          push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+          const info = stmt.insertPlan.run(
+            userId, date, dayPlan.day || dayName,
+            dayPlan.total_calories || 0, dayPlan.total_protein || 0,
+            dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson
+          );
+          planId = info.lastInsertRowid;
         }
 
-        const done = Object.keys(meals).length;
-        pendingJobs[jobId] = {
-          status: done >= 7 ? 'done' : 'pending',
-          progress: done, total: 7,
-          result: done >= 7 ? { meals } : null,
-          partialMeals: done < 7 ? { ...meals } : null,
-          error: null
-        };
-        console.log(`[AI] Day ${dayIdx+1}/7 done (${model}): ${dayPlan.total_calories} kcal`);
+        const plan = planToJSON(stmt.getPlanById.get(planId));
+        res.write(`data: ${JSON.stringify({ type: 'day_done', day: idx, name: dayName, date, plan })}\n\n`);
+        console.log(`[AI] Week day ${idx + 1}/7 done: ${dayName} ${dayPlan.total_calories} kcal`);
+        return plan;
+      })
+      .catch(err => {
+        console.error(`[AI] Week day ${idx + 1}/7 failed: ${err.message}`);
+        res.write(`data: ${JSON.stringify({ type: 'day_error', day: idx, name: dayName, date, error: err.message })}\n\n`);
+        return null;
+      });
+  });
 
-      } catch (err) {
-        console.error(`[AI] Day ${dayIdx+1}/7 failed:`, err.message);
-        // If we have at least some days, save what we have and report partial success
-        if (Object.keys(meals).length > 0) {
-          const existingPlan = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-          if (existingPlan) {
-            updateOne('meal_plans', p => p.id === existingPlan.id, { meals, updated_at: new Date().toISOString() });
-          } else {
-            push('meal_plans', { id: genId(), user_id: user.id, week_start, meals, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
-          }
-          pendingJobs[jobId] = {
-            status: 'done',
-            progress: Object.keys(meals).length, total: 7,
-            result: { meals },
-            partialMeals: null,
-            error: `Vygenerováno ${Object.keys(meals).length}/7 dní. Zkuste znovu pro doplnění chybějících dnů.`
-          };
-        } else {
-          pendingJobs[jobId] = { status: 'error', progress: 0, total: 7, result: null, error: err.message || 'AI generation failed' };
-        }
-        return;
+  try {
+    const results = await Promise.all(promises);
+    const succeeded = results.filter(Boolean);
+    res.write(`data: ${JSON.stringify({ type: 'complete', total: succeeded.length })}\n\n`);
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+  }
+
+  res.end();
+});
+
+// ── API: Chat ────────────────────────────────────────────────────────
+app.get('/api/chat/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const rows = stmt.getChatByUser.all(userId);
+  res.json(rows.reverse());
+});
+
+app.post('/api/chat', async (req, res) => {
+  const { userId, message, planDate } = req.body;
+  if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
+
+  const user = stmt.getUserById.get(userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // Save user message
+  stmt.insertChat.run(userId, 'user', message);
+
+  // Get recent history
+  const history = stmt.getChatByUser.all(userId).slice(0, 20).reverse();
+
+  // Get current plan if planDate provided
+  let planContext = '';
+  if (planDate) {
+    const plan = stmt.getPlanByUserDate.get(userId, planDate);
+    if (plan) {
+      planContext = `\nAktuální plán pro ${planDate}:\n${plan.meals_json}`;
+    }
+  }
+
+  const systemMsg = `Jsi výživový poradce pro ${user.name}. Cíl: ${user.calories_target || 2000}kcal. Diety: ${user.dietary_restrictions || 'žádné'}.
+${planContext}
+Odpovídej v češtině. Pokud uživatel žádá změnu jídelníčku, navrhni konkrétní změny.`;
+
+  // SSE for chat streaming
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  try {
+    const stream = await ai.chat.completions.create({
+      model: AI_MODEL,
+      messages: [
+        { role: 'system', content: systemMsg },
+        ...history.map(m => ({ role: m.role, content: m.content })),
+      ],
+      temperature: 0.7,
+      max_tokens: 2000,
+      stream: true,
+    });
+
+    let fullContent = '';
+    for await (const chunk of stream) {
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (delta) {
+        fullContent += delta;
+        res.write(`data: ${JSON.stringify({ type: 'token', content: delta })}\n\n`);
       }
     }
 
-    // All 7 days done
-    push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content: `Vygeneroval jsem jídelníček pro týden ${week_start} (~${targetCal} kcal/den).`, created_at: new Date().toISOString() });
-    console.log(`[AI] Complete plan saved for user ${user.id}, week ${week_start}`);
-  })();
-});
-
-app.get('/api/generate-status/:jobId', (req, res) => {
-  const job = pendingJobs[req.params.jobId];
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
-  if (job.status === 'done' || job.status === 'error') delete pendingJobs[req.params.jobId];
-});
-
-// ── API: Chat ─────────────────────────────────────────────────────────
-app.get('/api/chat/:userId', (req, res) => res.json(filter('chat_messages', m => m.user_id === parseInt(req.params.userId)).slice(-100)));
-
-app.post('/api/chat/:userId', async (req, res) => {
-  const { message, week_start } = req.body;
-  const user = find('users', u => u.id === parseInt(req.params.userId));
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  push('chat_messages', { id: genId(), user_id: user.id, role: 'user', content: message, created_at: new Date().toISOString() });
-
-  const currentPlan = week_start ? (find('meal_plans', p => p.user_id === user.id && p.week_start === week_start) || {}).meals : null;
-  const history = filter('chat_messages', m => m.user_id === user.id).slice(-20);
-
-  const systemMsg = `Jsi výživový poradce pro ${user.name}. Cíl: ${user.calories_target||2000}kcal. Diety: ${user.dietary_restrictions||'žádné'}.
-${currentPlan ? 'Aktuální plán:\n'+JSON.stringify(currentPlan,null,2) : 'Žádný plán.'}
-Pokud měníš jídelníček, vrať JSON: {"meals":{"0":{"day":"...","total_calories":N,...,"meals":{...}},...}}. Jinak vrať text.`;
-
-  try {
-    const { content } = await aiChatGenerate(
-      [{ role: 'system', content: systemMsg }, ...history.map(m => ({ role: m.role, content: m.content }))],
-      4000, 0.7
-    );
-    let updatedPlan = null;
-    if (content.includes('"meals"')) {
-      try {
-        const si = content.indexOf('{"meals"');
-        if (si >= 0) {
-          let js = content.substring(si); let depth=0,ei=0;
-          for (let i=0;i<js.length;i++){if(js[i]==='{')depth++;if(js[i]==='}'){depth--;if(depth===0){ei=i+1;break;}}}
-          js = js.substring(0,ei);
-          const parsed = JSON.parse(js);
-          if (parsed.meals) {
-            updatedPlan = parsed.meals;
-            const existing = find('meal_plans', p => p.user_id === user.id && p.week_start === week_start);
-            if (existing) { updateOne('meal_plans', p => p.id === existing.id, { meals: updatedPlan, updated_at: new Date().toISOString() }); }
-            else { push('meal_plans', { id: genId(), user_id: user.id, week_start, meals: updatedPlan, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); }
-            content = content.substring(0,si).trim() || 'Jídelníček aktualizován! ✅';
-          }
-        }
-      } catch {}
-    }
-    push('chat_messages', { id: genId(), user_id: user.id, role: 'assistant', content, created_at: new Date().toISOString() });
-    res.json({ message: content, updatedPlan });
+    // Save assistant message
+    stmt.insertChat.run(userId, 'assistant', fullContent);
+    res.write(`data: ${JSON.stringify({ type: 'done', message: fullContent })}\n\n`);
+    res.end();
   } catch (err) {
-    console.error('Chat error:', err);
-    res.status(500).json({ error: 'AI failed', details: err.message });
+    console.error(`[AI] Chat error: ${err.message}`);
+    res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+    res.end();
   }
 });
 
-// ── API: Shopping List ────────────────────────────────────────────────
-app.get('/api/shopping/:userId/:weekStart', (req, res) => {
-  const uid = parseInt(req.params.userId), ws = req.params.weekStart;
-  const existing = find('shopping_lists', s => s.user_id === uid && s.week_start === ws);
-  if (existing) return res.json(existing.items);
-  const plan = find('meal_plans', p => p.user_id === uid && p.week_start === ws);
-  if (!plan) return res.json([]);
+// ── API: Shopping List ───────────────────────────────────────────────
+app.get('/api/shopping-list/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const from = req.query.from;
+  const to = req.query.to;
+  if (!from || !to) return res.status(400).json({ error: 'from and to query params required' });
 
-  // Parse ingredient: handles both "kuřecí prsa 200g" and "200g kuřecích prsou"
+  // Check cached
+  const cached = stmt.getShoppingList.get(userId, from, to);
+  if (cached) return res.json({ items: JSON.parse(cached.items_json), from, to });
+
+  // Get plans in range
+  const plans = stmt.getPlansByUserRange.all(userId, from, to);
+  if (!plans.length) return res.json({ items: [], from, to });
+
   const parseIng = (s) => {
     const raw = s.trim();
-    // Try "name qty unit" format: "ovesné vločky 50g"
     let m = raw.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|lžíce|lžičky|lžička|lžiček|štípnutí|stroužek|balení|svazek|polévková lžíce)?$/i);
-    if (m) {
-      let unit = normalizeUnit(m[3] || 'ks');
-      return { name: m[1].trim(), qty: parseFloat(m[2].replace(',','.')), unit };
-    }
-    // Try "qty unit name" format: "150g kuřecích prsou", "3 vejce", "1 lžíce medu"
+    if (m) return { name: m[1].trim(), qty: parseFloat(m[2].replace(',', '.')), unit: normUnit(m[3] || 'ks') };
     m = raw.match(/^(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|ks|lžíce|lžičky|lžička|lžiček|štípnutí|stroužek|balení|svazek|polévková lžíce)?\s+(.+)$/i);
-    if (m) {
-      let unit = normalizeUnit(m[2] || 'ks');
-      return { name: m[3].trim(), qty: parseFloat(m[1].replace(',','.')), unit };
-    }
+    if (m) return { name: m[3].trim(), qty: parseFloat(m[1].replace(',', '.')), unit: normUnit(m[2] || 'ks') };
     return { name: raw, qty: 0, unit: '' };
   };
 
-  const normalizeUnit = (u) => {
+  const normUnit = (u) => {
     const l = (u || 'ks').toLowerCase();
-    if (['lžíce','lžičky','lžička','lžiček','polévková lžíce'].includes(l)) return 'lžíce';
-    if (['stroužek','stroužky'].includes(l)) return 'stroužky';
+    if (['lžíce', 'lžičky', 'lžička', 'lžiček', 'polévková lžíce'].includes(l)) return 'lžíce';
+    if (['stroužek', 'stroužky'].includes(l)) return 'stroužky';
     return l;
   };
 
-  // Category mapping (Czech)
   const categorize = (name) => {
     const n = name.toLowerCase();
     const cats = [
@@ -395,7 +578,7 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
       [/vejce/, '🥚 Vejce'],
       [/chléb|chleb|toast|knäckebrot|tortilla|polenta/, '🍞 Pečivo'],
       [/rýže|těstovin|kuskus|quinoa|pohanka|vločky|mouka|knedlík/, '🌾 Obiloviny'],
-      [/banán|jablk|jablk|jahod|borůvk|malin|hrozn|ovoc|citrus|citrón|pomeranč/, '🍎 Ovoce'],
+      [/banán|jablk|jahod|borůvk|malin|hrozn|ovoc|citrus|citrón|pomeranč/, '🍎 Ovoce'],
       [/okurk|rajč|paprik|brokolic|špenát|cuket|salát|ředkvič|mrkev|cibul|oliv|zelí|luštěnin|fazol|hrášek|zelenin|avokád/, '🥬 Zelenina'],
       [/protein|whey|srvát/, '💪 Protein'],
       [/olej|máslo|med|sirup|arašídové máslo/, '🧈 Tuky a sladidla'],
@@ -406,28 +589,20 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
     return '📦 Ostatní';
   };
 
-  // Collect and merge all ingredients across all days/meals
-  const merged = {};
-  // For fuzzy matching: strip adjectives and find canonical base name
-  const baseName = (n) => {
-    return n.toLowerCase()
-      .replace(/\s*\(.*?\)\s*/g, '')  // remove parenthetical notes
-      .replace(/\b(syrov[éý]|čerstv[éeý]|mražen[éeý]|grilovan[éeý]|vařen[éeý]|pečen[éeý]|celozrnn[éeý]|odtučněn[éeý]|polotučn[éeý]|libov[éeý]|hladké|na ozdobu|bez kůže|ve vlastní šťávě)\b/gi, '')
-      .replace(/\s+/g, ' ').trim();
-  };
+  const baseName = (n) => n.toLowerCase().replace(/\s*\(.*?\)\s*/g, '').replace(/\b(syrov[éý]|čerstv[éeý]|mražen[éeý]|grilovan[éeý]|vařen[éeý]|pečen[éeý]|celozrnn[éeý]|odtučněn[éeý]|polotučn[éeý]|libov[éeý]|hladké|na ozdobu|bez kůže|ve vlastní šťávě)\b/gi, '').replace(/\s+/g, ' ').trim();
 
-  Object.values(plan.meals).forEach(day => {
-    Object.values(day.meals || {}).forEach(meal => {
+  const merged = {};
+
+  plans.forEach(planRow => {
+    const dayMeals = JSON.parse(planRow.meals_json);
+    Object.values(dayMeals).forEach(meal => {
       (meal.ingredients || []).forEach(raw => {
         const p = parseIng(raw);
-        // Find best matching key
         const bn = baseName(p.name);
         let bestKey = null, bestScore = 0;
         for (const existingKey of Object.keys(merged)) {
           const eb = baseName(existingKey);
-          // Exact base match
           if (eb === bn) { bestKey = existingKey; bestScore = 1; break; }
-          // One contains the other (substantive match)
           if (eb.length > 3 && bn.length > 3) {
             if (eb.includes(bn) || bn.includes(eb)) {
               const score = Math.min(eb.length, bn.length) / Math.max(eb.length, bn.length);
@@ -441,51 +616,34 @@ app.get('/api/shopping/:userId/:weekStart', (req, res) => {
           if (!merged[bestKey].also) merged[bestKey].also = [];
           merged[bestKey].also.push(`${p.qty} ${p.unit}`);
         } else {
-          const key = p.name.toLowerCase();
-          merged[key] = { name: p.name, qty: p.qty, unit: p.unit, category: categorize(p.name), checked: false };
+          merged[p.name.toLowerCase()] = { name: p.name, qty: p.qty, unit: p.unit, category: categorize(p.name), checked: false };
         }
       });
     });
   });
 
-  // Format display name with merged quantities
   const list = Object.values(merged).map(item => {
     let display = item.name;
     if (item.qty > 0) {
-      // Pretty-print qty
-      const q = item.qty % 1 === 0 ? item.qty : item.qty.toFixed(1).replace('.0','');
+      const q = item.qty % 1 === 0 ? item.qty : item.qty.toFixed(1).replace('.0', '');
       display += ` ${q} ${item.unit}`;
     }
     if (item.also) display += ` + ${item.also.join(' + ')}`;
     return { ...item, display };
-  });
+  }).sort((a, b) => a.category.localeCompare(b.category, 'cs') || a.name.localeCompare(b.name, 'cs'));
 
-  // Sort by category, then name
-  list.sort((a, b) => a.category.localeCompare(b.category, 'cs') || a.name.localeCompare(b.name, 'cs'));
-
-  push('shopping_lists', { id: genId(), user_id: uid, week_start: ws, items: list, created_at: new Date().toISOString() });
-  res.json(list);
+  // Cache
+  stmt.insertShoppingList.run(userId, from, to, JSON.stringify(list));
+  res.json({ items: list, from, to });
 });
 
-app.put('/api/shopping/:userId/:weekStart', (req, res) => {
-  const uid = parseInt(req.params.userId), ws = req.params.weekStart;
-  const existing = find('shopping_lists', s => s.user_id === uid && s.week_start === ws);
-  if (existing) { updateOne('shopping_lists', s => s.id === existing.id, { items: req.body.items }); }
-  else { push('shopping_lists', { id: genId(), user_id: uid, week_start: ws, items: req.body.items, created_at: new Date().toISOString() }); }
-  res.json({ ok: true });
-});
-
-// ── API: Prep Guide ───────────────────────────────────────────────────
-app.get('/api/prep/:userId/:weekStart', (req, res) => {
-  const plan = find('meal_plans', p => p.user_id === parseInt(req.params.userId) && p.week_start === req.params.weekStart);
-  if (!plan) return res.json({ days: [] });
-  res.json({ days: Object.values(plan.meals).map(day => ({ day: day.day, meals: Object.entries(day.meals||{}).map(([type, meal]) => ({ type, name: meal.name, prep: meal.prep, ingredients: meal.ingredients })) })) });
-});
-
-// ── Spa fallback ──────────────────────────────────────────────────────
+// ── SPA Fallback ─────────────────────────────────────────────────────
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-// ── Start ─────────────────────────────────────────────────────────────
+// ── Start ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Jídelníček running on :${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Jídelníček v3 running on :${PORT} (SQLite, day-by-day, parallel week)`);
+});
+
 process.on('uncaughtException', err => console.error('Uncaught:', err.message));

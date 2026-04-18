@@ -2,168 +2,181 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Jídelníček — AI Diet Planner</title>
-  <link rel="stylesheet" href="style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Jídelníček</title>
+  <meta name="theme-color" content="#08080c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥗</text></svg>">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app">
-    <!-- Mobile Header -->
-    <header class="mobile-header">
-      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-      <h1>🥗 Jídelníček</h1>
-      <button class="user-btn" onclick="showUserModal()">👤</button>
-    </header>
+  <div class="app" id="app">
 
-    <!-- Sidebar (overlay on mobile) -->
+    <!-- Sidebar -->
     <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
-    <div class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <h1>🥗 Jídelníček</h1>
-        <p>AI Diet Planner</p>
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="logo">
+          <div class="logo-icon">🥗</div>
+          <div>
+            <div class="logo-name">Jídelníček</div>
+            <div class="logo-sub">AI Diet Planner v3</div>
+          </div>
+        </div>
       </div>
+      <div class="sidebar-section-label">Profily</div>
       <div class="user-list" id="userList"></div>
-      <div class="btn-new-user" onclick="showUserModal(); closeSidebar();">+ Nový uživatel</div>
-    </div>
+      <button class="btn-add-user" onclick="showUserModal(); closeSidebar();">
+        <span class="plus">+</span> Nový profil
+      </button>
+      <div class="sidebar-footer">
+        <div class="model-badge">GLM-4.5-Air</div>
+      </div>
+    </nav>
 
     <!-- Main -->
-    <div class="main">
-      <!-- Week nav bar -->
-      <div class="topbar">
-        <div class="week-nav">
-          <button onclick="changeWeek(-1)">‹</button>
-          <span class="week-label" id="weekLabel"></span>
-          <button onclick="changeWeek(1)">›</button>
+    <main class="main">
+
+      <!-- Header -->
+      <header class="header">
+        <button class="icon-btn" onclick="toggleSidebar()" aria-label="Menu">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <div class="header-title">
+          <span class="header-week" id="weekLabel"></span>
         </div>
-        <button class="btn-generate" onclick="generatePlan()" id="btnGenerate">✨ Generovat</button>
-        <div class="topbar-actions">
-          <button onclick="showShopping()" title="Nákupní seznam">🛒</button>
-          <button onclick="showPrep()" title="Příprava">📋</button>
-          <button onclick="deletePlan()" class="danger" title="Smazat">🗑️</button>
+        <button class="icon-btn" onclick="showUserModal()" aria-label="Profil">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>
+        </button>
+      </header>
+
+      <!-- User chips + week nav -->
+      <div class="chip-bar" id="chipBar"></div>
+
+      <!-- Day tabs -->
+      <div class="day-tabs" id="dayTabs"></div>
+
+      <!-- Content -->
+      <div class="content" id="content">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">🍽️</div>
+          <h2>Vytvořte si jídelníček</h2>
+          <p>Přidejte profil a nechte AI<br>vytvořit váš týdenní plán</p>
         </div>
       </div>
 
-      <!-- User strip (shows selected user info) -->
-      <div class="user-strip" id="userStrip"></div>
-
-      <!-- Plan cards -->
-      <div class="plan-area" id="planArea">
-        <div class="empty-state">
-          <div class="icon">🍽️</div>
-          <h2>Začněte vytvořením profilu</h2>
-          <p>Přidejte uživatele a vygenerujte týdenní jídelníček pomocí AI</p>
-        </div>
+      <!-- Bottom bar -->
+      <div class="bottom-bar" id="bottomBar">
+        <button class="action-btn primary" id="btnGenerateDay" onclick="generateCurrentDay()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/></svg>
+          Den
+        </button>
+        <button class="action-btn primary week-btn" id="btnGenerateWeek" onclick="generateWeek()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          Týden
+        </button>
+        <button class="action-btn" id="btnShop" onclick="showShopping()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+        </button>
+        <button class="action-btn danger" id="btnDelete" onclick="deleteWeekPlans()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+        <button class="action-btn chat-btn" id="btnChat" onclick="toggleChat()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </button>
       </div>
 
-      <!-- Chat (bottom sheet on mobile) -->
-      <div class="chat-section">
-        <div class="chat-toggle" id="chatToggle" onclick="toggleChat()">
+      <!-- Chat panel -->
+      <div class="chat-panel" id="chatPanel">
+        <div class="chat-handle" onclick="toggleChat()"><div class="handle-bar"></div></div>
+        <div class="chat-header">
           <div class="ai-dot"></div>
           <span>AI Asistent</span>
-          <span class="chat-toggle-arrow" id="chatArrow">▲</span>
         </div>
-        <div class="chat-body" id="chatBody">
-          <div class="chat-messages" id="chatMessages">
-            <div class="chat-msg system">AI asistent vám pomůže upravit jídelníček podle vašich přání</div>
-          </div>
-          <div class="chat-input-area">
-            <textarea id="chatInput" placeholder="Zeptej se AI na změny..." rows="1" onkeydown="handleChatKey(event)"></textarea>
-            <button onclick="sendChat()">➤</button>
-          </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg system">Ahoj! Pomůžu ti upravit jídelníček podle tvých přání 🌿</div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea id="chatInput" placeholder="Napište zprávu..." rows="1" onkeydown="handleChatKey(event)"></textarea>
+          <button class="send-btn" onclick="sendChat()" aria-label="Odeslat">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
         </div>
       </div>
-    </div>
+    </main>
   </div>
 
   <!-- User Modal -->
   <div class="modal-overlay" id="userModal">
     <div class="modal">
-      <h2 id="userModalTitle">Nový uživatel</h2>
+      <div class="modal-handle"><div class="handle-bar"></div></div>
+      <h2 id="userModalTitle">Nový profil</h2>
       <input type="hidden" id="editUserId">
-      <div class="form-group">
-        <label>Jméno</label>
-        <input id="fName" placeholder="Jan Novák">
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Jazyk</label>
-          <select id="fLocale">
-            <option value="cs">Čeština</option>
-            <option value="en">English</option>
-          </select>
+      <div class="form-grid">
+        <div class="form-field span2">
+          <label>Jméno</label>
+          <input id="fName" placeholder="Jan Novák">
         </div>
-        <div class="form-group">
+        <div class="form-field">
           <label>Pohlaví</label>
-          <select id="fSex">
-            <option value="">—</option>
-            <option value="male">Muž</option>
-            <option value="female">Žena</option>
-          </select>
+          <select id="fSex"><option value="">—</option><option value="male">Muž</option><option value="female">Žena</option></select>
         </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Váha (kg)</label>
-          <input id="fWeight" type="number" step="0.1" placeholder="Aktuální">
-        </div>
-        <div class="form-group">
-          <label>Cíl (kg)</label>
-          <input id="fWeightGoal" type="number" step="0.1" placeholder="Cílová">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Výška (cm)</label>
-          <input id="fHeight" type="number">
-        </div>
-        <div class="form-group">
+        <div class="form-field">
           <label>Věk</label>
           <input id="fAge" type="number">
         </div>
-      </div>
-      <div class="form-group">
-        <label>Aktivita</label>
-        <select id="fActivity">
-          <option value="sedentary">Sedavý</option>
-          <option value="light">Lehká</option>
-          <option value="moderate" selected>Střední</option>
-          <option value="active">Aktivní</option>
-          <option value="very_active">Velmi aktivní</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Diety / restrikce</label>
-        <input id="fRestrictions" placeholder="např. bezlepková, vegetariánská...">
+        <div class="form-field">
+          <label>Váha (kg)</label>
+          <input id="fWeight" type="number" step="0.1" placeholder="Aktuální">
+        </div>
+        <div class="form-field">
+          <label>Cíl (kg)</label>
+          <input id="fWeightGoal" type="number" step="0.1" placeholder="Cílová">
+        </div>
+        <div class="form-field">
+          <label>Výška (cm)</label>
+          <input id="fHeight" type="number">
+        </div>
+        <div class="form-field span2">
+          <label>Aktivita</label>
+          <div class="segmented" id="fActivity">
+            <button data-v="sedentary" onclick="setSegment(this)">Sedavý</button>
+            <button data-v="light" onclick="setSegment(this)">Lehká</button>
+            <button data-v="moderate" class="active" onclick="setSegment(this)">Střední</button>
+            <button data-v="active" onclick="setSegment(this)">Aktivní</button>
+            <button data-v="very_active" onclick="setSegment(this)">Velmi</button>
+          </div>
+        </div>
+        <div class="form-field span2">
+          <label>Diety / restrikce</label>
+          <input id="fRestrictions" placeholder="např. bezlepková, vegetariánská...">
+        </div>
+        <div class="form-field span2">
+          <label>Alergie</label>
+          <input id="fAllergies" placeholder="např. ořechy, laktóza...">
+        </div>
+        <div class="form-field span2">
+          <label>Oblíbená jídla</label>
+          <input id="fFavorites" placeholder="např. kuře, rýže, brokolice...">
+        </div>
       </div>
       <div class="modal-actions">
-        <button onclick="closeUserModal()">Zrušit</button>
-        <button class="primary" onclick="saveUser()">Uložit</button>
+        <button class="btn-ghost" onclick="closeUserModal()">Zrušit</button>
+        <button class="btn-primary" onclick="saveUser()">Uložit</button>
       </div>
     </div>
   </div>
 
-  <!-- Shopping List -->
-  <div class="overlay-panel" id="shopOverlay" onclick="closeShopIfBg(event)">
+  <!-- Shopping Panel -->
+  <div class="panel-overlay" id="shopOverlay" onclick="closePanelIfBg(event, 'shopOverlay')">
     <div class="panel-sheet">
-      <div class="panel-handle"></div>
+      <div class="panel-handle"><div class="handle-bar"></div></div>
       <div class="panel-header">
-        <h2>🛒 Nákupní seznam</h2>
-        <button onclick="closeShop()">✕</button>
+        <h2>Nákupní seznam</h2>
+        <button class="icon-btn-sm" onclick="closeShop()">✕</button>
       </div>
       <div class="panel-body" id="shopItems"></div>
-    </div>
-  </div>
-
-  <!-- Prep Guide -->
-  <div class="overlay-panel" id="prepOverlay" onclick="closePrepIfBg(event)">
-    <div class="panel-sheet">
-      <div class="panel-handle"></div>
-      <div class="panel-header">
-        <h2>📋 Příprava</h2>
-        <button onclick="closePrep()">✕</button>
-      </div>
-      <div class="panel-body" id="prepContent"></div>
     </div>
   </div>
 
