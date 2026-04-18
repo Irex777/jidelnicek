@@ -127,8 +127,8 @@ function getLastInsertRowId() {
 }
 
 // ── AI Client ────────────────────────────────────────────────────────
-const AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODEL = 'GLM-4.5-Air';
+const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4';
+const AI_MODEL = process.env.AI_MODEL || 'GLM-4.5';
 const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
 console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL}`);
 
@@ -225,15 +225,18 @@ Pravidla:
 - Vrať POUZE JSON, žádný text navíc`;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   try {
     const completion = await ai.chat.completions.create(
-      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 3000 },
+      { model: AI_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.8, max_tokens: 8000 },
       { signal: controller.signal }
     );
     clearTimeout(timeoutId);
     const raw = (completion.choices[0].message.content || '').trim();
+    if (!raw) {
+      throw new Error('AI returned empty content (model may have used all tokens on reasoning). Try a non-thinking model.');
+    }
     return parseDayPlan(raw);
   } catch (err) {
     clearTimeout(timeoutId);
