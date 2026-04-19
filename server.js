@@ -418,7 +418,155 @@ app.post('/api/generate-day', async (req, res) => {
   }
 });
 
-// ── API: Generate week (parallel, SSE) ───────────────────────────────
+// ── Background generation status (in-memory) ────────────────────────
+const genStatus = new Map(); // key: "userId:weekStart", value: { status, completed, total, errors[] }
+
+function getGenKey(userId, weekStart) {
+  return `${userId}:${weekStart}`;
+}
+
+// Core generation logic — no res dependency, runs fully in background
+async function runWeekGeneration(userId, weekStart) {
+  const key = getGenKey(userId, weekStart);
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  if (!user) {
+    genStatus.set(key, { status: 'error', completed: 0, total: 7, errors: ['User not found'] });
+    return;
+  }
+
+  // Build array of 7 dates
+  const dates = [];
+  for (let i = 0; i < 7; i++) {
+    dates.push(addDays(weekStart, i));
+  }
+
+  // Get previous meal names for anti-repetition
+  const prevMealNames = [];
+  for (let i = 1; i <= 4; i++) {
+    const prevDate = addDays(weekStart, -i);
+    const prevPlan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, prevDate]);
+    if (prevPlan) {
+      prevMealNames.push(...extractMealNames(JSON.parse(prevPlan.meals_json)));
+    }
+  }
+
+  // Initialize status
+  genStatus.set(key, { status: 'generating', completed: 0, total: 7, errors: [] });
+  console.log(`[GEN] Started background week generation for ${key}`);
+
+  // Fire all 7 in parallel
+  const promises = dates.map((date, idx) => {
+    const dayIdx = getDayIndex(date);
+    const dayName = DAY_NAMES_CS[dayIdx];
+
+    return generateDayPlan(user, date, prevMealNames)
+      .then(dayPlan => {
+        const mealsJson = JSON.stringify(dayPlan.meals);
+
+        // Upsert into DB
+        const existing = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
+        let planId;
+        if (existing) {
+          runDb(
+            `UPDATE meal_plans SET day_name=?, total_calories=?, total_protein=?, total_carbs=?, total_fat=?, meals_json=?, updated_at=datetime('now') WHERE id=?`,
+            [dayPlan.day || dayName,
+             dayPlan.total_calories || 0,
+             dayPlan.total_protein || 0,
+             dayPlan.total_carbs || 0,
+             dayPlan.total_fat || 0,
+             mealsJson,
+             existing.id]
+          );
+          planId = existing.id;
+        } else {
+          planId = runDb(
+            `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, date, dayPlan.day || dayName,
+             dayPlan.total_calories || 0, dayPlan.total_protein || 0,
+             dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
+          );
+        }
+
+        console.log(`[GEN] ${key} day ${idx + 1}/7 done: ${dayName} ${dayPlan.total_calories} kcal`);
+
+        // Update status atomically
+        const s = genStatus.get(key);
+        if (s) {
+          s.completed++;
+          genStatus.set(key, s);
+        }
+      })
+      .catch(err => {
+        console.error(`[GEN] ${key} day ${idx + 1}/7 failed: ${err.message}`);
+        const s = genStatus.get(key);
+        if (s) {
+          s.errors.push({ day: idx, name: dayName, date, error: err.message });
+          s.completed++;
+          genStatus.set(key, s);
+        }
+      });
+  });
+
+  await Promise.all(promises);
+
+  // Mark complete
+  const final = genStatus.get(key);
+  if (final) {
+    final.status = 'complete';
+    genStatus.set(key, final);
+  }
+  console.log(`[GEN] Finished background week generation for ${key}: ${final?.completed || '?'}/7 done`);
+}
+
+// ── API: Generate week async (fire & forget, returns immediately) ────
+app.post('/api/generate-week-async', (req, res) => {
+  const { userId, weekStart } = req.body;
+  if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const key = getGenKey(userId, weekStart);
+  const existing = genStatus.get(key);
+
+  // If already generating, return current status
+  if (existing && existing.status === 'generating') {
+    return res.json({ status: 'already_generating', key, completed: existing.completed, total: existing.total });
+  }
+
+  // Kick off background generation (no await — fire and forget)
+  runWeekGeneration(userId, weekStart).catch(err => {
+    console.error(`[GEN] Fatal error for ${key}:`, err.message);
+    genStatus.set(key, { status: 'error', completed: 0, total: 7, errors: [{ error: err.message }] });
+  });
+
+  res.json({ status: 'started', key, completed: 0, total: 7 });
+});
+
+// ── API: Generation status (poll endpoint) ───────────────────────────
+app.get('/api/generate-status/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const weekStart = req.query.weekStart;
+  if (!weekStart) return res.status(400).json({ error: 'weekStart query param required' });
+
+  const key = getGenKey(userId, weekStart);
+  const status = genStatus.get(key);
+
+  if (!status) {
+    // No active/completed generation — check if all 7 days exist in DB
+    let existing = 0;
+    for (let i = 0; i < 7; i++) {
+      const date = addDays(weekStart, i);
+      const plan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
+      if (plan) existing++;
+    }
+    return res.json({ status: existing === 7 ? 'complete' : 'none', completed: existing, total: 7, errors: [] });
+  }
+
+  res.json(status);
+});
+
+// ── API: Generate week (parallel, SSE) — legacy, resilient to disconnect ──
 app.post('/api/generate-week', async (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
@@ -434,7 +582,15 @@ app.post('/api/generate-week', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  res.write(`data: ${JSON.stringify({ type: 'start', total: 7 })}\n\n`);
+  let clientConnected = true;
+  req.on('close', () => { clientConnected = false; });
+
+  function safeWrite(data) {
+    if (!clientConnected) return;
+    try { res.write(data); } catch (e) { clientConnected = false; }
+  }
+
+  safeWrite(`data: ${JSON.stringify({ type: 'start', total: 7 })}\n\n`);
 
   // Build array of 7 dates
   const dates = [];
@@ -486,13 +642,13 @@ app.post('/api/generate-week', async (req, res) => {
         }
 
         const plan = planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]));
-        res.write(`data: ${JSON.stringify({ type: 'day_done', day: idx, name: dayName, date, plan })}\n\n`);
+        safeWrite(`data: ${JSON.stringify({ type: 'day_done', day: idx, name: dayName, date, plan })}\n\n`);
         console.log(`[AI] Week day ${idx + 1}/7 done: ${dayName} ${dayPlan.total_calories} kcal`);
         return plan;
       })
       .catch(err => {
         console.error(`[AI] Week day ${idx + 1}/7 failed: ${err.message}`);
-        res.write(`data: ${JSON.stringify({ type: 'day_error', day: idx, name: dayName, date, error: err.message })}\n\n`);
+        safeWrite(`data: ${JSON.stringify({ type: 'day_error', day: idx, name: dayName, date, error: err.message })}\n\n`);
         return null;
       });
   });
@@ -500,12 +656,12 @@ app.post('/api/generate-week', async (req, res) => {
   try {
     const results = await Promise.all(promises);
     const succeeded = results.filter(Boolean);
-    res.write(`data: ${JSON.stringify({ type: 'complete', total: succeeded.length })}\n\n`);
+    safeWrite(`data: ${JSON.stringify({ type: 'complete', total: succeeded.length })}\n\n`);
   } catch (err) {
-    res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+    safeWrite(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
   }
 
-  res.end();
+  if (clientConnected) res.end();
 });
 
 // ── API: Chat ────────────────────────────────────────────────────────
