@@ -413,6 +413,9 @@ app.post('/api/auth/register', async (req, res) => {
       [email.toLowerCase().trim(), passwordHash, name.trim()]
     );
 
+    // Claim any orphan users (created before auth migration)
+    runDb('UPDATE users SET account_id = ? WHERE account_id IS NULL', [accountId]);
+
     // Create session token
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
@@ -442,6 +445,9 @@ app.post('/api/auth/login', async (req, res) => {
     if (!valid) {
       return res.status(401).json({ error: 'Neplatný e-mail nebo heslo' });
     }
+
+    // Claim any orphan users (created before auth migration)
+    runDb('UPDATE users SET account_id = ? WHERE account_id IS NULL', [account.id]);
 
     // Create session token
     const token = crypto.randomBytes(32).toString('hex');
