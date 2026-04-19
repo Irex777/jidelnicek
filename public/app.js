@@ -309,7 +309,7 @@ async function generateCurrentDay() {
   el.innerHTML = `<div class="gen-progress">
     <div class="gen-ring"></div>
     <div class="gen-text">Generuji ${dayName}...</div>
-    <div class="gen-sub">AI vytváří jídelníček (~5s)</div>
+    <div class="gen-sub">AI vytváří jídelníček (~30s)</div>
   </div>`;
 
   // Mark tab as generating
@@ -319,11 +319,16 @@ async function generateCurrentDay() {
   }
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120_000);
+
     const res = await fetch('/api/generate-day', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, date }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       const err = await res.json();
@@ -335,7 +340,10 @@ async function generateCurrentDay() {
     renderDayTabs();
     renderContent();
   } catch (err) {
-    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(err.message)}</p></div>`;
+    const msg = err.name === 'AbortError'
+      ? 'Požadavek vypršel (timeout 120s). Zkuste to prosím znovu.'
+      : esc(err.message);
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${msg}</p></div>`;
   } finally {
     btnDay.disabled = false;
     btnWeek.disabled = false;
@@ -364,11 +372,16 @@ async function generateWeek() {
   let completed = 0;
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300_000); // 5 min for full week
+
     const res = await fetch('/api/generate-week', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, weekStart: currentWeek }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -422,7 +435,10 @@ async function generateWeek() {
     renderDayTabs();
     renderContent();
   } catch (err) {
-    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(err.message)}</p></div>`;
+    const msg = err.name === 'AbortError'
+      ? 'Požadavek vypršel (timeout 5 min). Zkuste to prosím znovu.'
+      : esc(err.message);
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${msg}</p></div>`;
   } finally {
     btnDay.disabled = false;
     btnWeek.disabled = false;
