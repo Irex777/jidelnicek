@@ -922,3 +922,20 @@ function esc(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+// ── Version polling: auto-reload when server deploys new code ────────
+(function versionPoll() {
+  let initialVersion = null;
+  setInterval(() => {
+    fetch('/version.json?' + Date.now())
+      .then(r => r.json())
+      .then(v => {
+        if (!initialVersion) { initialVersion = v.version; return; }
+        if (v.version !== initialVersion) {
+          console.log(`[VERSION] Server updated (${initialVersion} → ${v.version}), reloading...`);
+          location.reload();
+        }
+      })
+      .catch(() => {}); // silent — don't spam on network errors
+  }, 30000);
+})();

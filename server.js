@@ -10,7 +10,57 @@ const OpenAI = require('openai');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+
+// ── No-cache headers for critical assets ──────────────────────────────
+// Prevents iPad/iOS browsers from serving stale cached JS/CSS/HTML
+const NO_CACHE_FILES = ['app.js', 'style.css', 'index.html'];
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false, // Don't serve index.html from static — we serve it with version injection below
+  setHeaders: (res, filePath) => {
+    if (NO_CACHE_FILES.some(f => filePath.endsWith(f))) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
+
+// ── Version endpoint (for auto-reload polling) ───────────────────────
+let APP_VERSION = Date.now().toString(36);
+app.get('/version.json', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'application/json');
+  res.json({ version: APP_VERSION });
+});
+
+// Generate public/version.json on startup
+function writeVersionFile() {
+  const vp = path.join(__dirname, 'public', 'version.json');
+  fs.writeFileSync(vp, JSON.stringify({ version: APP_VERSION }));
+  console.log(`[VERSION] ${APP_VERSION} written to public/version.json`);
+}
+
+// ── Serve index.html with cache-busting version in script/css tags ────
+let indexHtmlCache = null;
+let indexHtmlVersion = null;
+
+function getIndexHtml() {
+  if (indexHtmlCache && indexHtmlVersion === APP_VERSION) return indexHtmlCache;
+  const raw = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  indexHtmlCache = raw
+    .replace(/src="app\.js"/, `src="app.js?v=${APP_VERSION}"`)
+    .replace(/href="style\.css"/, `href="style.css?v=${APP_VERSION}"`);
+  indexHtmlVersion = APP_VERSION;
+  return indexHtmlCache;
+}
+
+app.get('/', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Content-Type', 'text/html');
+  res.send(getIndexHtml());
+});
 
 // ── Database (sql.js — WASM SQLite) ──────────────────────────────────
 const dataDir = path.join(__dirname, 'data');
@@ -947,13 +997,20 @@ Vrať POUZE JSON s tímto přesným formátem (žádný jiný text):
 });
 
 // ── SPA Fallback ─────────────────────────────────────────────────────
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Content-Type', 'text/html');
+  res.send(getIndexHtml());
+});
 
 // ── Start ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
 async function main() {
   await initDb();
+  writeVersionFile();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Jídelníček v3 running on :${PORT} (SQLite/sql.js WASM, day-by-day, parallel week)`);
   });
