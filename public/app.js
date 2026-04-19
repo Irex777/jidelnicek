@@ -56,7 +56,9 @@ function changeWeek(delta) {
   d.setDate(d.getDate() + delta * 7);
   currentWeek = getWeekStart(d);
   weekPlans = {};
+  bgGenDays = null;
   selectedDay = 0;
+  hideBgGenIndicator();
   updateUI();
   if (currentUser) loadWeekPlans();
 }
@@ -215,9 +217,26 @@ function renderDayTabs() {
   for (let i = 0; i < 7; i++) {
     const date = dates[i];
     const plan = weekPlans[date];
+    const genDayStatus = bgGenDays ? bgGenDays[date] : null;
+
     const tab = document.createElement('button');
     tab.className = `day-tab ${i === selectedDay ? 'active' : plan ? 'has-plan' : ''}`;
-    tab.innerHTML = `<div class="day-name">${DAY_NAMES_CS[i]}</div><div class="day-cal">${plan ? (plan.total_calories || '?') : '—'}</div>`;
+
+    // Determine what to show in the tab
+    let calContent;
+    if (plan) {
+      calContent = plan.total_calories || '?';
+    } else if (genDayStatus === 'generating') {
+      calContent = '<span class="tab-spinner"></span>';
+      tab.classList.add('gen-generating');
+    } else if (genDayStatus === 'error') {
+      calContent = '❌';
+      tab.classList.add('gen-error');
+    } else {
+      calContent = '—';
+    }
+
+    tab.innerHTML = `<div class="day-name">${DAY_NAMES_CS[i]}</div><div class="day-cal">${calContent}</div>`;
     tab.onclick = () => { selectedDay = i; renderDayTabs(); renderContent(); };
     tabs.appendChild(tab);
   }
@@ -234,8 +253,23 @@ function renderContent() {
   const dates = getWeekDates();
   const date = dates[selectedDay];
   const plan = weekPlans[date];
+  const genDayStatus = bgGenDays ? bgGenDays[date] : null;
 
   if (!plan) {
+    // If this day is currently generating, show generating placeholder
+    if (genDayStatus === 'generating') {
+      el.innerHTML = `<div class="empty-state">
+        <div class="gen-ring" style="width:48px;height:48px;margin:0 auto 16px"></div>
+        <h2>${DAY_NAMES_FULL[selectedDay]} — generuji...</h2>
+        <p style="color:var(--text2)">AI vytváří plán pro tento den.<br>Výsledek se zobrazí automaticky.</p>
+      </div>`;
+      return;
+    }
+    // If this day had an error, show error state
+    if (genDayStatus === 'error') {
+      el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>${DAY_NAMES_FULL[selectedDay]} — chyba</h2><p>Generování tohoto dne selhalo.<br>Zkuste vygenerovat znovu.</p></div>`;
+      return;
+    }
     el.innerHTML = `<div class="empty-state"><div class="empty-icon">✨</div><h2>${DAY_NAMES_FULL[selectedDay]} — bez plánu</h2><p>Klikněte na "Den" pro generování<br>tohoto dne, nebo "Týden" pro všech 7</p></div>`;
     return;
   }
@@ -354,8 +388,67 @@ async function generateCurrentDay() {
   }
 }
 
+// ── Background Generation Indicator ──────────────────────────────────
+function showBgGenIndicator(completed, total, isComplete, hasErrors) {
+  const el = document.getElementById('bgGenIndicator');
+  if (!el) return;
+  el.style.display = 'inline-flex';
+
+  const dot = el.querySelector('.bg-gen-dot');
+  const text = el.querySelector('.bg-gen-text');
+
+  if (isComplete) {
+    el.className = 'bg-gen-indicator bg-gen-done';
+    dot.className = 'bg-gen-dot';
+    text.textContent = hasErrors ? `⚠️ ${completed}/${total}` : `✅ ${completed}/${total} hotovo`;
+    // Auto-hide after 3s
+    setTimeout(() => { el.style.display = 'none'; bgGenDays = null; renderDayTabs(); }, 3000);
+  } else {
+    el.className = 'bg-gen-indicator';
+    dot.className = 'bg-gen-dot';
+    text.textContent = `⏳ ${completed}/${total}`;
+  }
+}
+
+function hideBgGenIndicator() {
+  const el = document.getElementById('bgGenIndicator');
+  if (el) el.style.display = 'none';
+}
+
+function updateDayTabsFromGenStatus(days) {
+  if (!days || !days.length) return;
+  // Build lookup: date -> status
+  bgGenDays = {};
+  days.forEach(d => { bgGenDays[d.date] = d.status; });
+
+  // Update tab contents without full re-render
+  const dates = getWeekDates();
+  const tabs = document.querySelectorAll('.day-tab');
+  days.forEach((d, i) => {
+    if (!tabs[i]) return;
+    const calEl = tabs[i].querySelector('.day-cal');
+    if (!calEl) return;
+
+    // Remove previous gen classes
+    tabs[i].classList.remove('gen-generating', 'gen-error');
+
+    if (d.status === 'done') {
+      calEl.textContent = d.calories || '?';
+      tabs[i].classList.add('has-plan');
+    } else if (d.status === 'generating') {
+      calEl.innerHTML = '<span class="tab-spinner"></span>';
+      tabs[i].classList.add('gen-generating');
+    } else if (d.status === 'error') {
+      calEl.textContent = '❌';
+      tabs[i].classList.add('gen-error');
+    }
+    // 'pending' stays as '—'
+  });
+}
+
 // ── Generate week (background + polling) ────────────────────────────
 let weekPollTimer = null;
+let bgGenDays = null; // { date: 'done'|'generating'|'error'|'pending' } — per-day generation status from server
 
 async function generateWeek() {
   if (!currentUser || generating) return;
@@ -366,6 +459,9 @@ async function generateWeek() {
   btnDay.disabled = true;
   btnWeek.disabled = true;
 
+  // Show persistent header indicator immediately
+  showBgGenIndicator(0, 7, false, false);
+
   const el = document.getElementById('content');
   el.innerHTML = `<div class="gen-progress">
     <div class="gen-ring"></div>
@@ -374,6 +470,12 @@ async function generateWeek() {
     <div class="gen-progress-bar"><div class="gen-progress-fill" id="genFill"></div></div>
     <div class="gen-hint" style="font-size:12px;color:var(--text3);margin-top:8px">Můžete zavřít stránku — generování pokračuje na serveru</div>
   </div>`;
+
+  // Mark all tabs as generating initially
+  bgGenDays = {};
+  const dates = getWeekDates();
+  dates.forEach(d => { bgGenDays[d] = 'generating'; });
+  renderDayTabs();
 
   try {
     // Fire and forget — server runs generation in background
@@ -396,6 +498,15 @@ async function generateWeek() {
       try {
         const statusRes = await fetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
         const status = await statusRes.json();
+
+        // Update persistent header indicator
+        const hasErrors = (status.errors && status.errors.length > 0);
+        showBgGenIndicator(status.completed, status.total, status.status === 'complete', hasErrors);
+
+        // Update day tabs with per-day status
+        if (status.days) {
+          updateDayTabsFromGenStatus(status.days);
+        }
 
         const genSub = document.getElementById('genSub');
         const genFill = document.getElementById('genFill');
@@ -451,6 +562,9 @@ async function generateWeek() {
     btnDay.disabled = false;
     btnWeek.disabled = false;
     generating = false;
+    hideBgGenIndicator();
+    bgGenDays = null;
+    renderDayTabs();
   }
 }
 
@@ -466,6 +580,14 @@ async function checkActiveGeneration() {
       const btnWeek = document.getElementById('btnGenerateWeek');
       btnDay.disabled = true;
       btnWeek.disabled = true;
+
+      // Show persistent header indicator
+      showBgGenIndicator(status.completed, status.total, false, false);
+
+      // Update day tabs with per-day status
+      if (status.days) {
+        updateDayTabsFromGenStatus(status.days);
+      }
 
       const el = document.getElementById('content');
       el.innerHTML = `<div class="gen-progress">
@@ -483,6 +605,16 @@ async function checkActiveGeneration() {
         try {
           const sRes = await fetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
           const s = await sRes.json();
+
+          // Update persistent header indicator
+          const hasErrors = (s.errors && s.errors.length > 0);
+          showBgGenIndicator(s.completed, s.total, s.status === 'complete', hasErrors);
+
+          // Update day tabs with per-day status
+          if (s.days) {
+            updateDayTabsFromGenStatus(s.days);
+          }
+
           const genSub = document.getElementById('genSub');
           const genFill = document.getElementById('genFill');
           const genText = document.getElementById('genText');

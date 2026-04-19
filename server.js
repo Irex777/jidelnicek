@@ -552,18 +552,45 @@ app.get('/api/generate-status/:userId', (req, res) => {
   const key = getGenKey(userId, weekStart);
   const status = genStatus.get(key);
 
-  if (!status) {
-    // No active/completed generation — check if all 7 days exist in DB
-    let existing = 0;
-    for (let i = 0; i < 7; i++) {
-      const date = addDays(weekStart, i);
-      const plan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
-      if (plan) existing++;
+  // Build per-day status array
+  const days = [];
+  let completed = 0;
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(weekStart, i);
+    const plan = queryOne('SELECT * FROM meal_plans WHERE user_id = ? AND date = ?', [userId, date]);
+
+    // Check if this day had an error in the current generation
+    const dayError = status?.errors?.find(e => e.day === i);
+
+    if (plan) {
+      days.push({ date, index: i, status: 'done', calories: plan.total_calories || 0 });
+      completed++;
+    } else if (dayError) {
+      days.push({ date, index: i, status: 'error', error: dayError.error });
+      completed++; // errors count toward completed
+    } else if (status && status.status === 'generating') {
+      days.push({ date, index: i, status: 'generating' });
+    } else {
+      days.push({ date, index: i, status: 'pending' });
     }
-    return res.json({ status: existing === 7 ? 'complete' : 'none', completed: existing, total: 7, errors: [] });
   }
 
-  res.json(status);
+  if (!status) {
+    return res.json({
+      status: completed === 7 ? 'complete' : 'none',
+      completed, total: 7, errors: [], days
+    });
+  }
+
+  // Use computed per-day completed count (more accurate than status.completed which counts errors)
+  const response = {
+    status: status.status,
+    completed: completed,
+    total: status.total,
+    errors: status.errors,
+    days
+  };
+  res.json(response);
 });
 
 // ── API: Generate week (parallel, SSE) — legacy, resilient to disconnect ──
