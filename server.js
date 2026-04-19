@@ -130,7 +130,7 @@ function runDb(sql, params = []) {
 
 // ── AI Client ────────────────────────────────────────────────────────
 const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4';
-const AI_MODEL = process.env.AI_MODEL || 'GLM-4.5';
+const AI_MODEL = process.env.AI_MODEL || 'glm-5-turbo';
 const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS) || 4000;
 const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
 console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS}`);
