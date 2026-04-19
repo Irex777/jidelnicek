@@ -2,6 +2,163 @@
 // Jídelníček v3 — Day-by-day generation, parallel week via SSE
 // ═══════════════════════════════════════════════════════════════════════
 
+// ── Auth State ──────────────────────────────────────────────────────
+let authToken = null;
+let currentAccount = null;
+
+// ── Auth Helpers ────────────────────────────────────────────────────
+function getAuthHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  return headers;
+}
+
+async function authFetch(url, options = {}) {
+  if (!options.headers) options.headers = {};
+  if (authToken) options.headers['Authorization'] = `Bearer ${authToken}`;
+  if (!options.headers['Content-Type'] && options.method && options.method !== 'GET') {
+    options.headers['Content-Type'] = 'application/json';
+  }
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    // Session expired — logout
+    doLogout(true);
+    throw new Error('Relace vypršela. Přihlaste se znovu.');
+  }
+  return res;
+}
+
+// ── Auth UI ─────────────────────────────────────────────────────────
+function switchAuthTab(tab) {
+  document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.login-tab[onclick*="${tab}"]`).classList.add('active');
+  document.getElementById('loginForm').style.display = tab === 'login' ? '' : 'none';
+  document.getElementById('registerForm').style.display = tab === 'register' ? '' : 'none';
+  // Clear errors
+  document.getElementById('loginError').textContent = '';
+  document.getElementById('registerError').textContent = '';
+}
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+
+  if (!email || !password) {
+    errorEl.textContent = 'Vyplňte e-mail a heslo';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Chyba při přihlášení';
+      return;
+    }
+    authToken = data.token;
+    currentAccount = data.account;
+    localStorage.setItem('authToken', authToken);
+    showApp();
+  } catch (err) {
+    errorEl.textContent = err.message || 'Chyba připojení';
+  }
+}
+
+async function doRegister() {
+  const name = document.getElementById('regName').value.trim();
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const errorEl = document.getElementById('registerError');
+  errorEl.textContent = '';
+
+  if (!name || !email || !password) {
+    errorEl.textContent = 'Vyplňte všechny údaje';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Chyba při registraci';
+      return;
+    }
+    authToken = data.token;
+    currentAccount = data.account;
+    localStorage.setItem('authToken', authToken);
+    showApp();
+  } catch (err) {
+    errorEl.textContent = err.message || 'Chyba připojení';
+  }
+}
+
+async function doLogout(expired = false) {
+  if (authToken && !expired) {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` },
+      });
+    } catch (e) {}
+  }
+  authToken = null;
+  currentAccount = null;
+  localStorage.removeItem('authToken');
+  showLogin();
+}
+
+function showLogin() {
+  document.getElementById('loginScreen').style.display = '';
+  document.getElementById('app').style.display = 'none';
+}
+
+function showApp() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').style.display = '';
+  // Clear password fields
+  document.getElementById('loginPassword').value = '';
+  document.getElementById('regPassword').value = '';
+  document.getElementById('loginError').textContent = '';
+  document.getElementById('registerError').textContent = '';
+  // Load app data
+  loadUsers();
+}
+
+async function checkAuth() {
+  const token = localStorage.getItem('authToken');
+  if (!token) {
+    showLogin();
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/me', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      localStorage.removeItem('authToken');
+      showLogin();
+      return;
+    }
+    const data = await res.json();
+    authToken = token;
+    currentAccount = data.account;
+    showApp();
+  } catch (e) {
+    showLogin();
+  }
+}
+
 // ── State ────────────────────────────────────────────────────────────
 let users = [];
 let currentUser = null;
@@ -19,9 +176,24 @@ const MEAL_ICONS = { breakfast: '🌅', morning_snack: '🍎', lunch: '🍲', af
 
 // ── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  loadUsers();
+  checkAuth();
   setupTextareaResize();
+  setupLoginKeyboard();
 });
+
+// ── Login keyboard (Enter to submit) ───────────────────────────────
+function setupLoginKeyboard() {
+  ['loginEmail', 'loginPassword'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') doLogin();
+    });
+  });
+  ['regName', 'regEmail', 'regPassword'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') doRegister();
+    });
+  });
+}
 
 // ── Week/Date Helpers ────────────────────────────────────────────────
 function getWeekStart(date) {
@@ -76,7 +248,7 @@ function closeSidebar() {
 // ── Users ────────────────────────────────────────────────────────────
 async function loadUsers() {
   try {
-    const res = await fetch('/api/users');
+    const res = await authFetch('/api/users');
     users = await res.json();
     renderUsers();
     updateUI();
@@ -177,9 +349,9 @@ async function saveUser() {
   if (!data.name) return;
 
   if (id) {
-    await fetch(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    await authFetch(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   } else {
-    await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    await authFetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   }
   closeUserModal();
   await loadUsers();
@@ -193,7 +365,7 @@ async function loadWeekPlans() {
     const dates = getWeekDates();
     const from = dates[0];
     const to = dates[6];
-    const res = await fetch(`/api/plan/${currentUser.id}?from=${from}&to=${to}`);
+    const res = await authFetch(`/api/plan/${currentUser.id}?from=${from}&to=${to}`);
     const plans = await res.json();
     weekPlans = {};
     plans.forEach(p => { weekPlans[p.date] = p; });
@@ -359,7 +531,7 @@ async function generateCurrentDay() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 120_000);
 
-    const res = await fetch('/api/generate-day', {
+    const res = await authFetch('/api/generate-day', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, date }),
@@ -479,7 +651,7 @@ async function generateWeek() {
 
   try {
     // Fire and forget — server runs generation in background
-    const res = await fetch('/api/generate-week-async', {
+    const res = await authFetch('/api/generate-week-async', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, weekStart: currentWeek }),
@@ -496,7 +668,7 @@ async function generateWeek() {
 
     weekPollTimer = setInterval(async () => {
       try {
-        const statusRes = await fetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
+        const statusRes = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
         const status = await statusRes.json();
 
         // Update persistent header indicator
@@ -572,7 +744,7 @@ async function generateWeek() {
 async function checkActiveGeneration() {
   if (!currentUser) return;
   try {
-    const res = await fetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
+    const res = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
     const status = await res.json();
     if (status.status === 'generating') {
       generating = true;
@@ -603,7 +775,7 @@ async function checkActiveGeneration() {
       const MAX_POLL_MS = 5 * 60 * 1000;
       weekPollTimer = setInterval(async () => {
         try {
-          const sRes = await fetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
+          const sRes = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
           const s = await sRes.json();
 
           // Update persistent header indicator
@@ -659,7 +831,7 @@ async function deleteWeekPlans() {
   for (const date of dates) {
     const plan = weekPlans[date];
     if (plan) {
-      await fetch(`/api/plan/${plan.id}`, { method: 'DELETE' });
+      await authFetch(`/api/plan/${plan.id}`, { method: 'DELETE' });
     }
   }
   weekPlans = {};
@@ -682,7 +854,7 @@ function toggleChat() {
 async function loadChat() {
   if (!currentUser) return;
   try {
-    const res = await fetch(`/api/chat/${currentUser.id}`);
+    const res = await authFetch(`/api/chat/${currentUser.id}`);
     const msgs = await res.json();
     const container = document.getElementById('chatMessages');
     container.innerHTML = '<div class="chat-msg system">Ahoj! Pomůžu ti upravit jídelníček podle tvých přání 🌿</div>';
@@ -719,7 +891,7 @@ async function sendChat() {
   const planDate = dates[selectedDay];
 
   try {
-    const res = await fetch('/api/chat', {
+    const res = await authFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, message: msg, planDate }),
@@ -787,7 +959,7 @@ async function showShopping() {
     const dates = getWeekDates();
     const from = dates[0];
     const to = dates[6];
-    const res = await fetch(`/api/shopping-list/${currentUser.id}?from=${from}&to=${to}`);
+    const res = await authFetch(`/api/shopping-list/${currentUser.id}?from=${from}&to=${to}`);
     const data = await res.json();
     if (!data.items?.length) {
       alert('Žádné plány pro tento týden — nejdřív vygenerujte jídelníček.');
@@ -850,7 +1022,7 @@ async function showMealDetail(params) {
   overlay.classList.add('active');
 
   try {
-    const res = await fetch('/api/meal-detail', {
+    const res = await authFetch('/api/meal-detail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ planId, mealType, meal }),

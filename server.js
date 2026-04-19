@@ -5,6 +5,8 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const initSqlJs = require('sql.js');
 const OpenAI = require('openai');
 
@@ -94,6 +96,28 @@ async function initDb() {
 
   db.run(`PRAGMA foreign_keys = ON`);
 
+  // ── Accounts table (authentication) ────────────────────────────────
+  db.run(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // ── Sessions table ─────────────────────────────────────────────────
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      account_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL,
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    )
+  `);
+
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,9 +132,23 @@ async function initDb() {
       allergies TEXT DEFAULT '',
       favorite_foods TEXT DEFAULT '',
       calories_target INTEGER DEFAULT 2000,
-      created_at TEXT DEFAULT (datetime('now'))
+      account_id INTEGER DEFAULT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL
     )
   `);
+
+  // ── Migration: add account_id to existing users table ──
+  try {
+    const userCols = queryAll("PRAGMA table_info(users)");
+    const hasAccountId = userCols.some(c => c.name === 'account_id');
+    if (!hasAccountId) {
+      db.run('ALTER TABLE users ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL');
+      console.log('[DB] Added account_id column to users table');
+    }
+  } catch (e) {
+    console.log('[DB] account_id migration check:', e.message);
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS meal_plans (
@@ -322,25 +360,137 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, db: 'sqlite-wasm' });
 });
 
+// ── Auth Middleware ──────────────────────────────────────────────────
+const AUTH_EXEMPT_ROUTES = ['/api/health', '/api/auth/register', '/api/auth/login'];
+
+function authMiddleware(req, res, next) {
+  // Exempt routes
+  if (AUTH_EXEMPT_ROUTES.some(r => req.path === r)) return next();
+
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+  if (!token) return res.status(401).json({ error: 'Přihlášení vyžadováno' });
+
+  const session = queryOne('SELECT s.*, a.email, a.name as account_name FROM sessions s JOIN accounts a ON s.account_id = a.id WHERE s.token = ?', [token]);
+  if (!session) return res.status(401).json({ error: 'Neplatná relace' });
+
+  // Check expiry
+  const now = new Date().toISOString();
+  if (session.expires_at < now) {
+    runDb('DELETE FROM sessions WHERE token = ?', [token]);
+    return res.status(401).json({ error: 'Relace vypršela' });
+  }
+
+  // Attach account info to request
+  req.account = { id: session.account_id, email: session.email, name: session.account_name };
+  next();
+}
+
+// Apply auth middleware to all /api/* routes
+app.use('/api', authMiddleware);
+
+// ── API: Auth — Register ────────────────────────────────────────────
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, name } = req.body;
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: 'Vyplňte všechny údaje' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'Heslo musí mít alespoň 6 znaků' });
+  }
+
+  // Check if email already exists
+  const existing = queryOne('SELECT id FROM accounts WHERE email = ?', [email.toLowerCase().trim()]);
+  if (existing) {
+    return res.status(400).json({ error: 'Tento e-mail je již zaregistrován' });
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const accountId = runDb(
+      'INSERT INTO accounts (email, password_hash, name) VALUES (?, ?, ?)',
+      [email.toLowerCase().trim(), passwordHash, name.trim()]
+    );
+
+    // Create session token
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+    runDb('INSERT INTO sessions (token, account_id, expires_at) VALUES (?, ?, ?)', [token, accountId, expiresAt]);
+
+    res.json({ token, account: { id: accountId, email: email.toLowerCase().trim(), name: name.trim() } });
+  } catch (err) {
+    console.error('[AUTH] Register error:', err.message);
+    res.status(500).json({ error: 'Chyba při registraci' });
+  }
+});
+
+// ── API: Auth — Login ───────────────────────────────────────────────
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Vyplňte e-mail a heslo' });
+  }
+
+  const account = queryOne('SELECT * FROM accounts WHERE email = ?', [email.toLowerCase().trim()]);
+  if (!account) {
+    return res.status(401).json({ error: 'Neplatný e-mail nebo heslo' });
+  }
+
+  try {
+    const valid = await bcrypt.compare(password, account.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Neplatný e-mail nebo heslo' });
+    }
+
+    // Create session token
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+    runDb('INSERT INTO sessions (token, account_id, expires_at) VALUES (?, ?, ?)', [token, account.id, expiresAt]);
+
+    res.json({ token, account: { id: account.id, email: account.email, name: account.name } });
+  } catch (err) {
+    console.error('[AUTH] Login error:', err.message);
+    res.status(500).json({ error: 'Chyba při přihlášení' });
+  }
+});
+
+// ── API: Auth — Logout ──────────────────────────────────────────────
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (token) {
+    runDb('DELETE FROM sessions WHERE token = ?', [token]);
+  }
+  res.json({ ok: true });
+});
+
+// ── API: Auth — Me (get current account info) ───────────────────────
+app.get('/api/auth/me', (req, res) => {
+  res.json({ account: req.account });
+});
+
 // ── API: Users ───────────────────────────────────────────────────────
 app.get('/api/users', (req, res) => {
-  res.json(queryAll('SELECT * FROM users ORDER BY id'));
+  const accountId = req.account.id;
+  res.json(queryAll('SELECT * FROM users WHERE account_id = ? ORDER BY id', [accountId]));
 });
 
 app.post('/api/users', (req, res) => {
   const d = req.body;
   if (!d.name) return res.status(400).json({ error: 'Name is required' });
+  const accountId = req.account.id;
 
   // Calculate calories target
   const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
   const calories_target = calcCaloriesTarget(tempUser);
 
   const newUserId = runDb(
-    `INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO users (name, sex, age, weight_current, weight_goal, height, activity_level, dietary_restrictions, allergies, favorite_foods, calories_target, account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [d.name, d.sex || null, d.age || null,
      d.weight_current || null, d.weight_goal || null, d.height || null,
      d.activity_level || 'moderate', d.dietary_restrictions || '',
-     d.allergies || '', d.favorite_foods || '', calories_target]
+     d.allergies || '', d.favorite_foods || '', calories_target, accountId]
   );
   const user = queryOne('SELECT * FROM users WHERE id = ?', [newUserId]);
   res.json(user);
@@ -349,6 +499,12 @@ app.post('/api/users', (req, res) => {
 app.put('/api/users/:id', (req, res) => {
   const d = req.body;
   const id = parseInt(req.params.id);
+  const accountId = req.account.id;
+
+  // Verify ownership
+  const existing = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [id, accountId]);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+
   const tempUser = { ...d, activity_level: d.activity_level || 'moderate' };
   const calories_target = calcCaloriesTarget(tempUser);
 
@@ -364,13 +520,24 @@ app.put('/api/users/:id', (req, res) => {
 });
 
 app.delete('/api/users/:id', (req, res) => {
-  runDb('DELETE FROM users WHERE id = ?', [parseInt(req.params.id)]);
+  const id = parseInt(req.params.id);
+  const accountId = req.account.id;
+  // Verify ownership
+  const existing = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [id, accountId]);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+  runDb('DELETE FROM users WHERE id = ?', [id]);
   res.json({ ok: true });
 });
 
 // ── API: Get plans ───────────────────────────────────────────────────
 app.get('/api/plan/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
+  const accountId = req.account.id;
+
+  // Verify this profile belongs to the logged-in account
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Profil nenalezen' });
+
   const from = req.query.from;
   const to = req.query.to;
 
@@ -387,9 +554,14 @@ app.get('/api/plan/:userId', (req, res) => {
 // ── API: Edit a meal plan ────────────────────────────────────────────
 app.put('/api/plan/:planId', (req, res) => {
   const planId = parseInt(req.params.planId);
+  const accountId = req.account.id;
   const d = req.body;
   const existing = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
   if (!existing) return res.status(404).json({ error: 'Plan not found' });
+
+  // Verify ownership via user -> account chain
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [existing.user_id, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Plan not found' });
 
   let meals = JSON.parse(existing.meals_json);
   if (d.meals) meals = d.meals;
@@ -418,7 +590,14 @@ app.put('/api/plan/:planId', (req, res) => {
 
 // ── API: Delete a plan ───────────────────────────────────────────────
 app.delete('/api/plan/:planId', (req, res) => {
-  runDb('DELETE FROM meal_plans WHERE id = ?', [parseInt(req.params.planId)]);
+  const planId = parseInt(req.params.planId);
+  const accountId = req.account.id;
+  const existing = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
+  if (!existing) return res.status(404).json({ error: 'Plan not found' });
+  // Verify ownership
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [existing.user_id, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Plan not found' });
+  runDb('DELETE FROM meal_plans WHERE id = ?', [planId]);
   res.json({ ok: true });
 });
 
@@ -426,8 +605,9 @@ app.delete('/api/plan/:planId', (req, res) => {
 app.post('/api/generate-day', async (req, res) => {
   const { userId, date } = req.body;
   if (!userId || !date) return res.status(400).json({ error: 'userId and date required' });
+  const accountId = req.account.id;
 
-  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // Get previous 3-4 days of meal names for anti-repetition
@@ -580,8 +760,9 @@ async function runWeekGeneration(userId, weekStart) {
 app.post('/api/generate-week-async', (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+  const accountId = req.account.id;
 
-  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   const key = getGenKey(userId, weekStart);
@@ -606,6 +787,11 @@ app.get('/api/generate-status/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
   const weekStart = req.query.weekStart;
   if (!weekStart) return res.status(400).json({ error: 'weekStart query param required' });
+  const accountId = req.account.id;
+
+  // Verify ownership
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Profil nenalezen' });
 
   const key = getGenKey(userId, weekStart);
   const status = genStatus.get(key);
@@ -655,8 +841,9 @@ app.get('/api/generate-status/:userId', (req, res) => {
 app.post('/api/generate-week', async (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+  const accountId = req.account.id;
 
-  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // SSE headers
@@ -752,6 +939,11 @@ app.post('/api/generate-week', async (req, res) => {
 // ── API: Chat ────────────────────────────────────────────────────────
 app.get('/api/chat/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
+  const accountId = req.account.id;
+  // Verify ownership
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Profil nenalezen' });
+
   const rows = queryAll('SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 100', [userId]);
   res.json(rows.reverse());
 });
@@ -759,8 +951,9 @@ app.get('/api/chat/:userId', (req, res) => {
 app.post('/api/chat', async (req, res) => {
   const { userId, message, planDate } = req.body;
   if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
+  const accountId = req.account.id;
 
-  const user = queryOne('SELECT * FROM users WHERE id = ?', [userId]);
+  const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // Save user message
@@ -824,6 +1017,11 @@ Odpovídej v češtině. Pokud uživatel žádá změnu jídelníčku, navrhni k
 // ── API: Shopping List ───────────────────────────────────────────────
 app.get('/api/shopping-list/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
+  const accountId = req.account.id;
+  // Verify ownership
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Profil nenalezen' });
+
   const from = req.query.from;
   const to = req.query.to;
   if (!from || !to) return res.status(400).json({ error: 'from and to query params required' });
@@ -924,6 +1122,13 @@ app.get('/api/shopping-list/:userId', (req, res) => {
 app.post('/api/meal-detail', async (req, res) => {
   const { planId, mealType, meal } = req.body;
   if (!planId || !mealType || !meal) return res.status(400).json({ error: 'planId, mealType, and meal required' });
+  const accountId = req.account.id;
+
+  // Verify plan exists and belongs to this account
+  const plan = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
+  if (!plan) return res.status(404).json({ error: 'Plan not found' });
+  const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [plan.user_id, accountId]);
+  if (!profile) return res.status(404).json({ error: 'Plan not found' });
 
   // Check cache first
   const cached = queryOne('SELECT * FROM meal_details WHERE plan_id = ? AND meal_type = ?', [planId, mealType]);
@@ -935,10 +1140,6 @@ app.post('/api/meal-detail', async (req, res) => {
       cached: true,
     });
   }
-
-  // Verify plan exists
-  const plan = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
-  if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
   // Get user for context
   const user = queryOne('SELECT * FROM users WHERE id = ?', [plan.user_id]);

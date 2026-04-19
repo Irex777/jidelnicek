@@ -11,7 +11,55 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app" id="app">
+  <!-- Login Screen -->
+  <div class="login-screen" id="loginScreen">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="login-icon">🥗</div>
+        <h1>Jídelníček</h1>
+        <p class="login-subtitle">AI Diet Planner</p>
+      </div>
+
+      <div class="login-tabs">
+        <button class="login-tab active" onclick="switchAuthTab('login')">Přihlášení</button>
+        <button class="login-tab" onclick="switchAuthTab('register')">Registrace</button>
+      </div>
+
+      <!-- Login Form -->
+      <div class="login-form" id="loginForm">
+        <div class="form-field">
+          <label>E-mail</label>
+          <input type="email" id="loginEmail" placeholder="vas@email.cz" autocomplete="email">
+        </div>
+        <div class="form-field">
+          <label>Heslo</label>
+          <input type="password" id="loginPassword" placeholder="••••••" autocomplete="current-password">
+        </div>
+        <div class="login-error" id="loginError"></div>
+        <button class="btn-primary login-btn" onclick="doLogin()">Přihlásit se</button>
+      </div>
+
+      <!-- Register Form -->
+      <div class="login-form" id="registerForm" style="display:none">
+        <div class="form-field">
+          <label>Jméno</label>
+          <input type="text" id="regName" placeholder="Jan Novák" autocomplete="name">
+        </div>
+        <div class="form-field">
+          <label>E-mail</label>
+          <input type="email" id="regEmail" placeholder="vas@email.cz" autocomplete="email">
+        </div>
+        <div class="form-field">
+          <label>Heslo</label>
+          <input type="password" id="regPassword" placeholder="Minimálně 6 znaků" autocomplete="new-password">
+        </div>
+        <div class="login-error" id="registerError"></div>
+        <button class="btn-primary login-btn" onclick="doRegister()">Zaregistrovat se</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app" id="app" style="display:none">
 
     <!-- Sidebar -->
     <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
@@ -31,6 +79,10 @@
         <span class="plus">+</span> Nový profil
       </button>
       <div class="sidebar-footer">
+        <button class="btn-logout" onclick="doLogout()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Odhlásit se
+        </button>
         <div class="model-badge">glm-5-turbo</div>
       </div>
     </nav>

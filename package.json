@@ -8,6 +8,7 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "express": "^4.21.0",
     "openai": "^4.77.0",
     "sql.js": "^1.11.0"
