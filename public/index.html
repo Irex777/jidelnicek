@@ -197,6 +197,34 @@
     </div>
   </div>
 
+  <!-- Service Worker registration — inline to bust cache even before app.js loads -->
+  <script>
+  (function() {
+    if ('serviceWorker' in navigator) {
+      // Track if this is the first SW registration (before it's active)
+      var hadActiveSW = !!navigator.serviceWorker.controller;
+
+      navigator.serviceWorker.register('/sw.js').then(function(reg) {
+        console.log('[SW] Registered, scope:', reg.scope);
+
+        // If a new SW was activated and took control, force reload to get fresh assets
+        navigator.serviceWorker.addEventListener('controllerchange', function() {
+          console.log('[SW] Controller changed — reloading for fresh assets');
+          location.reload();
+        });
+
+        // If SW is already active (returning visit), check if we need a reload
+        if (reg.active && !hadActiveSW) {
+          // SW just became active for the first time — reload once
+          console.log('[SW] First activation — reloading');
+          location.reload();
+        }
+      }).catch(function(err) {
+        console.warn('[SW] Registration failed:', err);
+      });
+    }
+  })();
+  </script>
   <script src="app.js"></script>
 </body>
 </html>

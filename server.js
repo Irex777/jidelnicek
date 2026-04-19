@@ -30,7 +30,7 @@ function writeVersionFile() {
 
 // ── No-cache headers for critical assets ──────────────────────────────
 // Prevents iPad/iOS browsers from serving stale cached JS/CSS/HTML
-const NO_CACHE_FILES = ['app.js', 'style.css', 'index.html'];
+const NO_CACHE_FILES = ['app.js', 'style.css', 'index.html', 'sw.js'];
 app.use(express.static(path.join(__dirname, 'public'), {
   index: false, // Don't serve index.html from static — we serve it with version injection below
   setHeaders: (res, filePath) => {
@@ -57,6 +57,12 @@ function getIndexHtml() {
 }
 
 app.get('/', (req, res) => {
+  // Version redirect: if no ?v= param, redirect to /?v=HASH
+  // This forces iPad Safari to treat it as a new URL, bypassing cached HTML at /
+  if (!req.query.v) {
+    return res.redirect(302, `/?v=${APP_VERSION}`);
+  }
+
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
