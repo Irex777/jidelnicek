@@ -11,6 +11,23 @@ const OpenAI = require('openai');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+// ── Version tracking ─────────────────────────────────────────────────
+let APP_VERSION = Date.now().toString(36);
+
+// Version route registered FIRST (before express.static) so it takes priority
+app.get('/version.json', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'application/json');
+  res.json({ version: APP_VERSION });
+});
+
+// Generate public/version.json on startup
+function writeVersionFile() {
+  const vp = path.join(__dirname, 'public', 'version.json');
+  fs.writeFileSync(vp, JSON.stringify({ version: APP_VERSION }));
+  console.log(`[VERSION] ${APP_VERSION} written to public/version.json`);
+}
+
 // ── No-cache headers for critical assets ──────────────────────────────
 // Prevents iPad/iOS browsers from serving stale cached JS/CSS/HTML
 const NO_CACHE_FILES = ['app.js', 'style.css', 'index.html'];
@@ -24,21 +41,6 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
   }
 }));
-
-// ── Version endpoint (for auto-reload polling) ───────────────────────
-let APP_VERSION = Date.now().toString(36);
-app.get('/version.json', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Content-Type', 'application/json');
-  res.json({ version: APP_VERSION });
-});
-
-// Generate public/version.json on startup
-function writeVersionFile() {
-  const vp = path.join(__dirname, 'public', 'version.json');
-  fs.writeFileSync(vp, JSON.stringify({ version: APP_VERSION }));
-  console.log(`[VERSION] ${APP_VERSION} written to public/version.json`);
-}
 
 // ── Serve index.html with cache-busting version in script/css tags ────
 let indexHtmlCache = null;
