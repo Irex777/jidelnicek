@@ -268,8 +268,9 @@ function renderDay(plan) {
   for (const [type, label] of Object.entries(MEAL_TYPES)) {
     const meal = (plan.meals || {})[type];
     if (!meal) continue;
+    const mealData = esc(JSON.stringify({ planId: plan.id, mealType: type, meal }));
     html += `
-      <div class="meal-card">
+      <div class="meal-card clickable" onclick='showMealDetail(${JSON.stringify({ planId: plan.id, mealType: type, meal }).replace(/'/g, "&#39;")})'>
         <div class="meal-card-header">
           <div class="meal-type-label"><span class="dot"></span>${MEAL_ICONS[type] || ''} ${label}</div>
           <div class="meal-cal-badge">${meal.calories || 0} kcal</div>
@@ -283,6 +284,7 @@ function renderDay(plan) {
           </div>
           ${meal.ingredients?.length ? `<div class="meal-ingredients">${meal.ingredients.map(esc).join(' · ')}</div>` : ''}
           ${meal.prep_time ? `<div class="meal-prep-time">${esc(meal.prep_time)}</div>` : ''}
+          <div class="meal-tap-hint">Klepněte pro detail</div>
         </div>
       </div>`;
   }
@@ -618,6 +620,100 @@ function renderShoppingList(items) {
 function closeShop() { document.getElementById('shopOverlay').classList.remove('active'); }
 
 function closePanelIfBg(e, id) { if (e.target === e.currentTarget) document.getElementById(id).classList.remove('active'); }
+
+// ── Meal Detail Modal ────────────────────────────────────────────────
+let mealDetailBusy = false;
+
+async function showMealDetail(params) {
+  if (mealDetailBusy) return;
+  mealDetailBusy = true;
+
+  const { planId, mealType, meal } = params;
+  const overlay = document.getElementById('mealDetailOverlay');
+  const body = document.getElementById('mealDetailBody');
+
+  // Show modal with loading state
+  body.innerHTML = `<div class="detail-loading">
+    <div class="gen-ring" style="width:48px;height:48px;margin:0 auto 16px"></div>
+    <div style="font-size:14px;color:var(--text2)">Generuji detail jídla...</div>
+  </div>`;
+
+  document.getElementById('mealDetailTitle').textContent = meal.name || 'Detail jídla';
+  document.getElementById('mealDetailMeta').innerHTML = `
+    <span style="color:var(--green)">${meal.calories || '?'} kcal</span>
+    <span style="color:var(--blue)">B: ${meal.protein || '?'}g</span>
+    <span style="color:var(--orange)">S: ${meal.carbs || '?'}g</span>
+    <span style="color:var(--red)">T: ${meal.fat || '?'}g</span>
+  `;
+  overlay.classList.add('active');
+
+  try {
+    const res = await fetch('/api/meal-detail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planId, mealType, meal }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Chyba při generování');
+    }
+
+    const data = await res.json();
+    renderMealDetailContent(data, meal);
+  } catch (err) {
+    body.innerHTML = `<div class="detail-error">❌ ${esc(err.message)}</div>`;
+  } finally {
+    mealDetailBusy = false;
+  }
+}
+
+function renderMealDetailContent(data, meal) {
+  const body = document.getElementById('mealDetailBody');
+  let html = '';
+
+  // Ingredients recap
+  if (meal.ingredients?.length) {
+    html += `<div class="detail-section">
+      <div class="detail-section-title">🧾 Suroviny</div>
+      <div class="detail-ingredients">${meal.ingredients.map(esc).join(', ')}</div>
+    </div>`;
+  }
+
+  // Recipe steps
+  if (data.recipe?.length) {
+    html += `<div class="detail-section">
+      <div class="detail-section-title">👨‍🍳 Recept</div>
+      <div class="detail-recipe">${data.recipe.map((step, i) => `<div class="recipe-step"><span class="step-num">${i + 1}</span><span class="step-text">${esc(step)}</span></div>`).join('')}</div>
+    </div>`;
+  }
+
+  // Cookware
+  if (data.cookware?.length) {
+    html += `<div class="detail-section">
+      <div class="detail-section-title">🍳 Nádobí a vybavení</div>
+      <div class="detail-cookware">${data.cookware.map(item => `<span class="cookware-tag">${esc(item)}</span>`).join('')}</div>
+    </div>`;
+  }
+
+  // Why this meal
+  if (data.why) {
+    html += `<div class="detail-section">
+      <div class="detail-section-title">💡 Proč toto jídlo</div>
+      <div class="detail-why">${esc(data.why)}</div>
+    </div>`;
+  }
+
+  if (data.cached) {
+    html += `<div class="detail-cached">📄 Uloženo v mezipaměti</div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function closeMealDetail() {
+  document.getElementById('mealDetailOverlay').classList.remove('active');
+}
 
 // ── Utility ──────────────────────────────────────────────────────────
 function esc(str) {

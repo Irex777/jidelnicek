@@ -180,6 +180,19 @@
     </div>
   </div>
 
+  <!-- Meal Detail Modal -->
+  <div class="modal-overlay" id="mealDetailOverlay" onclick="if(event.target===this)closeMealDetail()">
+    <div class="modal" style="max-height:85dvh">
+      <div class="modal-handle"><div class="handle-bar"></div></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <h2 id="mealDetailTitle" style="margin-bottom:0;font-size:18px;flex:1">Detail jídla</h2>
+        <button class="icon-btn-sm" onclick="closeMealDetail()" style="font-size:20px">✕</button>
+      </div>
+      <div id="mealDetailMeta" style="display:flex;gap:12px;font-size:13px;font-weight:600;margin-bottom:16px"></div>
+      <div class="panel-body" id="mealDetailBody"></div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

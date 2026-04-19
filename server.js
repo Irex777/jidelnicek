@@ -96,6 +96,20 @@ async function initDb() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS meal_details (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id INTEGER NOT NULL,
+      meal_type TEXT NOT NULL,
+      recipe_json TEXT NOT NULL DEFAULT '[]',
+      cookware_json TEXT NOT NULL DEFAULT '[]',
+      why_text TEXT NOT NULL DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (plan_id) REFERENCES meal_plans(id) ON DELETE CASCADE,
+      UNIQUE(plan_id, meal_type)
+    )
+  `);
+
   saveDb();
 }
 
@@ -663,6 +677,90 @@ app.get('/api/shopping-list/:userId', (req, res) => {
   // Cache
   runDb('INSERT INTO shopping_lists (user_id, date_from, date_to, items_json) VALUES (?, ?, ?, ?)', [userId, from, to, JSON.stringify(list)]);
   res.json({ items: list, from, to });
+});
+
+// ── API: Meal Detail (on-demand AI generation, cached) ──────────────
+app.post('/api/meal-detail', async (req, res) => {
+  const { planId, mealType, meal } = req.body;
+  if (!planId || !mealType || !meal) return res.status(400).json({ error: 'planId, mealType, and meal required' });
+
+  // Check cache first
+  const cached = queryOne('SELECT * FROM meal_details WHERE plan_id = ? AND meal_type = ?', [planId, mealType]);
+  if (cached) {
+    return res.json({
+      recipe: JSON.parse(cached.recipe_json),
+      cookware: JSON.parse(cached.cookware_json),
+      why: cached.why_text,
+      cached: true,
+    });
+  }
+
+  // Verify plan exists
+  const plan = queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]);
+  if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+  // Get user for context
+  const user = queryOne('SELECT * FROM users WHERE id = ?', [plan.user_id]);
+
+  const prompt = `Jsi výživový poradce a kuchař. Pro následující jídlo vytvoř detailní informace.
+
+Jídlo: ${meal.name}
+Suroviny: ${(meal.ingredients || []).join(', ')}
+Kalorie: ${meal.calories || '?'} kcal | Bílkoviny: ${meal.protein || '?'}g | Sacharidy: ${meal.carbs || '?'}g | Tuky: ${meal.fat || '?'}g
+Doba přípravy: ${meal.prep_time || '?'}
+${user ? `Uživatel: ${user.name}, cíl ${user.calories_target || 2000} kcal, dieta: ${user.dietary_restrictions || 'žádné'}, alergie: ${user.allergies || 'žádné'}` : ''}
+
+Vrať POUZE JSON s tímto přesným formátem (žádný jiný text):
+{"recipe":["Krok 1: ...","Krok 2: ...","Krok 3: ..."],"cookware":["Pánev","Hrnek","..."],"why":"Stručné vysvětlení (2-3 věty) proč je toto jídlo vhodné z nutričního hlediska s ohledem na makroživiny a cíl uživatele."}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    const completion = await ai.chat.completions.create(
+      {
+        model: AI_MODEL,
+        messages: [
+          { role: 'system', content: 'Output directly. No reasoning. No thinking. Just respond with the JSON immediately.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 2000,
+      },
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+
+    const raw = (completion.choices[0].message.content || '').trim();
+    if (!raw) throw new Error('AI returned empty content');
+
+    // Parse the AI response
+    let detail;
+    try {
+      let content = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+      const jsonStart = content.indexOf('{');
+      if (jsonStart > 0) content = content.substring(jsonStart);
+      detail = JSON.parse(content);
+    } catch (parseErr) {
+      console.error(`[AI] meal-detail parse error: ${parseErr.message}, raw: ${raw.substring(0, 200)}`);
+      throw new Error('Failed to parse AI response');
+    }
+
+    const recipe = Array.isArray(detail.recipe) ? detail.recipe : [];
+    const cookware = Array.isArray(detail.cookware) ? detail.cookware : [];
+    const why = detail.why || '';
+
+    // Cache in DB
+    runDb(
+      'INSERT OR REPLACE INTO meal_details (plan_id, meal_type, recipe_json, cookware_json, why_text) VALUES (?, ?, ?, ?, ?)',
+      [planId, mealType, JSON.stringify(recipe), JSON.stringify(cookware), why]
+    );
+
+    res.json({ recipe, cookware, why, cached: false });
+  } catch (err) {
+    console.error(`[AI] meal-detail error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── SPA Fallback ─────────────────────────────────────────────────────
