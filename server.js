@@ -361,7 +361,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // ── Auth Middleware ──────────────────────────────────────────────────
-const AUTH_EXEMPT_ROUTES = ['/api/auth/register', '/api/auth/login', '/api/health'];
+const AUTH_EXEMPT_ROUTES=['/auth/register', '/auth/login', '/health'];
 
 function authMiddleware(req, res, next) {
   // Exempt routes
