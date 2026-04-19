@@ -82,7 +82,7 @@ async function loadUsers() {
     updateUI();
     if (users.length > 0) {
       const target = currentUser && users.find(u => u.id === currentUser.id) ? currentUser.id : users[0].id;
-      selectUser(target, false);
+      selectUser(target);
     }
   } catch (e) { console.error('loadUsers:', e); }
 }
