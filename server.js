@@ -241,9 +241,10 @@ function runDb(sql, params = []) {
 // ── AI Client ────────────────────────────────────────────────────────
 const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4';
 const AI_MODEL = process.env.AI_MODEL || 'glm-5-turbo';
-const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS) || 4000;
+const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS) || 3000;
+const AI_TIMEOUT = parseInt(process.env.AI_TIMEOUT) || 45000; // 45s per day
 const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
-console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS}`);
+console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS} timeout=${AI_TIMEOUT}ms`);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 const DAY_NAMES_CS = ['Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota', 'Neděle'];
@@ -291,7 +292,36 @@ function parseDayPlan(raw) {
   let content = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
   const jsonStart = content.indexOf('{');
   if (jsonStart > 0) content = content.substring(jsonStart);
-  return JSON.parse(content);
+  const jsonEnd = content.lastIndexOf('}');
+  if (jsonEnd > 0) content = content.substring(0, jsonEnd + 1);
+
+  try { return JSON.parse(content); } catch {}
+
+  // Attempt bracket repair for truncated JSON
+  let fixed = content;
+  fixed = fixed.replace(/,\s*"[^"]*":\s*"[^"]*$/, ''); // incomplete string value
+  fixed = fixed.replace(/,\s*"[^"]*":\s*\d*$/, '');      // incomplete number value
+  fixed = fixed.replace(/,\s*"[^"]*"\s*:\s*$/, '');       // incomplete key
+  fixed = fixed.replace(/,\s*$/, '');                     // trailing comma
+
+  let braces = 0, brackets = 0, inStr = false, esc = false;
+  for (let i = 0; i < fixed.length; i++) {
+    const ch = fixed[i];
+    if (esc) { esc = false; continue; }
+    if (ch === '\\') { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === '{') braces++;
+    if (ch === '}') braces--;
+    if (ch === '[') brackets++;
+    if (ch === ']') brackets--;
+  }
+  while (braces > 0 || brackets > 0) {
+    if (braces > brackets) { fixed += '}'; braces--; }
+    else { fixed += ']'; brackets--; }
+  }
+
+  return JSON.parse(fixed);
 }
 
 function planToJSON(row) {
@@ -315,37 +345,43 @@ async function generateDayPlan(user, date, previousMealNames) {
   const dayIdx = getDayIndex(date);
   const dayName = DAY_NAMES_CS[dayIdx];
   const targetCal = user.calories_target || 2000;
+  const t0 = Date.now();
 
+  // Compact anti-repeat list (max 15 names to save tokens)
   const antiRepeat = previousMealNames.length > 0
-    ? `\nJiž navržená jídla (NEOPAKUJ stejná jména): ${previousMealNames.join(', ')}`
-    : '';
+    ? `\nNEOPAKUJ: ${previousMealNames.slice(-15).join(', ')}` : '';
 
-  const prompt = `Vytvoř jídelníček pro ${dayName} jako JSON. Uživatel: ${user.name}, ${user.sex === 'male' ? 'muž' : user.sex === 'female' ? 'žena' : '?'}, ${user.age || '?'}let, ${user.weight_current || '?'}kg→${user.weight_goal || '?'}kg. Aktivita: ${user.activity_level || 'moderate'}, diety: ${user.dietary_restrictions || 'žádné'}, alergie: ${user.allergies || 'žádné'}, oblíbené: ${user.favorite_foods || '-'}. Cíl: ${targetCal}kcal.${antiRepeat}
-
-Vrať POUZE JSON: {"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["s množstvím"],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
-Pravidla: české suroviny, makro 30P/40C/30F, kalorie rozděleny 22/8/30/8/32%, max 30min příprava. Pouze JSON.`;
+  // Condensed prompt — fewer input tokens = faster processing
+  const sex = user.sex === 'male' ? 'muž' : user.sex === 'female' ? 'žena' : '?';
+  const prompt = `${dayName}, ${user.name}, ${sex}, ${user.age||'?'}let, ${user.weight_current||'?'}→${user.weight_goal||'?'}kg, ${user.activity_level||'moderate'}, diety:${user.dietary_restrictions||'žádné'}${user.allergies ? ', alergie:'+user.allergies : ''}. Cíl:${targetCal}kcal.${antiRepeat}
+JSON: {"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"total_fat":N,"meals":{"breakfast":{"name":"","calories":N,"protein":N,"carbs":N,"fat":N,"ingredients":["100g ..."],"prep_time":"N min"},"morning_snack":{...},"lunch":{...},"afternoon_snack":{...},"dinner":{...}}}
+České suroviny, 30P/40C/30F, max 30min. Pouze JSON.`;
 
   const messages = [
-    { role: 'system', content: 'Output directly. No reasoning. No thinking. Just respond with the JSON immediately.' },
+    { role: 'system', content: 'Jsi výživový poradce. Vrať POUZE JSON jídelníček pro 1 den. Žádný markdown, žádný komentář.' },
     { role: 'user', content: prompt }
   ];
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT);
 
   try {
     const completion = await ai.chat.completions.create(
-      { model: AI_MODEL, messages, temperature: 0.8, max_tokens: AI_MAX_TOKENS },
+      { model: AI_MODEL, messages, temperature: 0.7, max_tokens: AI_MAX_TOKENS },
       { signal: controller.signal }
     );
     clearTimeout(timeoutId);
     const raw = (completion.choices[0].message.content || '').trim();
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     if (!raw) {
-      throw new Error('AI returned empty content (model may have used all tokens on reasoning). Try a non-thinking model.');
+      throw new Error(`Empty response after ${elapsed}s — model may have used all tokens on reasoning`);
     }
+    console.log(`[AI] ${dayName}: ${raw.length} chars in ${elapsed}s`);
     return parseDayPlan(raw);
   } catch (err) {
     clearTimeout(timeoutId);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    console.error(`[AI] ${dayName} failed after ${elapsed}s: ${err.message}`);
     throw err;
   }
 }
