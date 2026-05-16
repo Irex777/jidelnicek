@@ -14,7 +14,7 @@ const app = express();
 app.use(express.json({ limit: '2mb' }));
 
 // ── Version tracking ─────────────────────────────────────────────────
-let APP_VERSION = Date.now().toString(36);
+let APP_VERSION = process.env.APP_VERSION || Date.now().toString(36);
 
 // Version route registered FIRST (before express.static) so it takes priority
 app.get('/version.json', (req, res) => {
@@ -22,13 +22,6 @@ app.get('/version.json', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.json({ version: APP_VERSION });
 });
-
-// Generate public/version.json on startup
-function writeVersionFile() {
-  const vp = path.join(__dirname, 'public', 'version.json');
-  fs.writeFileSync(vp, JSON.stringify({ version: APP_VERSION }));
-  console.log(`[VERSION] ${APP_VERSION} written to public/version.json`);
-}
 
 // ── No-cache headers for critical assets ──────────────────────────────
 // Prevents iPad/iOS browsers from serving stale cached JS/CSS/HTML
@@ -73,10 +66,10 @@ app.get('/', (req, res) => {
 });
 
 // ── Database (sql.js — WASM SQLite) ──────────────────────────────────
-const dataDir = path.join(__dirname, 'data');
+const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-const DB_PATH = path.join(dataDir, 'jidelnicek.db');
+const DB_PATH = process.env.DB_PATH || path.join(dataDir, 'jidelnicek.db');
 let db;
 
 function saveDb() {
@@ -238,13 +231,40 @@ function runDb(sql, params = []) {
   return lastId;
 }
 
+function invalidateShoppingListsForUser(userId) {
+  runDb('DELETE FROM shopping_lists WHERE user_id = ?', [userId]);
+}
+
+function invalidateMealDetailsForPlan(planId) {
+  runDb('DELETE FROM meal_details WHERE plan_id = ?', [planId]);
+}
+
 // ── AI Client ────────────────────────────────────────────────────────
 const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4';
 const AI_MODEL = process.env.AI_MODEL || 'glm-5-turbo';
 const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS) || 3000;
 const AI_TIMEOUT = parseInt(process.env.AI_TIMEOUT) || 45000; // 45s per day
-const ai = new OpenAI({ apiKey: process.env.ZAI_API_KEY, baseURL: AI_BASE_URL });
-console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS} timeout=${AI_TIMEOUT}ms`);
+const AI_KEY = process.env.ZAI_API_KEY || process.env.OPENAI_API_KEY || '';
+let ai = null;
+class AiConfigError extends Error {
+  constructor() {
+    super('AI není nakonfigurovaná. Nastavte ZAI_API_KEY pro generování jídelníčků a chat.');
+    this.name = 'AiConfigError';
+    this.status = 503;
+  }
+}
+function getAiClient() {
+  if (!AI_KEY) throw new AiConfigError();
+  if (!ai) ai = new OpenAI({ apiKey: AI_KEY, baseURL: AI_BASE_URL });
+  return ai;
+}
+function sendAiConfigError(res) {
+  return res.status(503).json({ error: new AiConfigError().message, code: 'AI_NOT_CONFIGURED' });
+}
+function isAiConfigError(err) {
+  return err instanceof AiConfigError || err?.status === 503 || err?.code === 'AI_NOT_CONFIGURED';
+}
+console.log(`[AI] model=${AI_MODEL} baseURL=${AI_BASE_URL} max_tokens=${AI_MAX_TOKENS} timeout=${AI_TIMEOUT}ms configured=${AI_KEY ? 'yes' : 'no'}`);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 const DAY_NAMES_CS = ['Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota', 'Neděle'];
@@ -366,7 +386,7 @@ JSON: {"day":"${dayName}","total_calories":N,"total_protein":N,"total_carbs":N,"
   const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT);
 
   try {
-    const completion = await ai.chat.completions.create(
+    const completion = await getAiClient().chat.completions.create(
       { model: AI_MODEL, messages, temperature: 0.7, max_tokens: AI_MAX_TOKENS },
       { signal: controller.signal }
     );
@@ -393,7 +413,7 @@ function extractMealNames(planData) {
 
 // ── API: Health ──────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, db: 'sqlite-wasm' });
+  res.json({ status: 'ok', version: '3.0.0', model: AI_MODEL, ai_configured: Boolean(AI_KEY), db: 'sqlite-wasm' });
 });
 
 // ── Auth Middleware ──────────────────────────────────────────────────
@@ -449,9 +469,6 @@ app.post('/api/auth/register', async (req, res) => {
       [email.toLowerCase().trim(), passwordHash, name.trim()]
     );
 
-    // Claim any orphan users (created before auth migration)
-    runDb('UPDATE users SET account_id = ? WHERE account_id IS NULL', [accountId]);
-
     // Create session token
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
@@ -481,9 +498,6 @@ app.post('/api/auth/login', async (req, res) => {
     if (!valid) {
       return res.status(401).json({ error: 'Neplatný e-mail nebo heslo' });
     }
-
-    // Claim any orphan users (created before auth migration)
-    runDb('UPDATE users SET account_id = ? WHERE account_id IS NULL', [account.id]);
 
     // Create session token
     const token = crypto.randomBytes(32).toString('hex');
@@ -627,6 +641,8 @@ app.put('/api/plan/:planId', (req, res) => {
      JSON.stringify(meals),
      planId]
   );
+  invalidateMealDetailsForPlan(planId);
+  invalidateShoppingListsForUser(existing.user_id);
   res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId])));
 });
 
@@ -640,6 +656,7 @@ app.delete('/api/plan/:planId', (req, res) => {
   const profile = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [existing.user_id, accountId]);
   if (!profile) return res.status(404).json({ error: 'Plan not found' });
   runDb('DELETE FROM meal_plans WHERE id = ?', [planId]);
+  invalidateShoppingListsForUser(existing.user_id);
   res.json({ ok: true });
 });
 
@@ -647,6 +664,7 @@ app.delete('/api/plan/:planId', (req, res) => {
 app.post('/api/generate-day', async (req, res) => {
   const { userId, date } = req.body;
   if (!userId || !date) return res.status(400).json({ error: 'userId and date required' });
+  if (!AI_KEY) return sendAiConfigError(res);
   const accountId = req.account.id;
 
   const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
@@ -682,6 +700,8 @@ app.post('/api/generate-day', async (req, res) => {
          mealsJson,
          existing.id]
       );
+      invalidateMealDetailsForPlan(existing.id);
+      invalidateShoppingListsForUser(userId);
       return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [existing.id])));
     } else {
       const newPlanId = runDb(
@@ -690,10 +710,12 @@ app.post('/api/generate-day', async (req, res) => {
          dayPlan.total_calories || 0, dayPlan.total_protein || 0,
          dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
       );
+      invalidateShoppingListsForUser(userId);
       return res.json(planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [newPlanId])));
     }
   } catch (err) {
     console.error(`[AI] generate-day error: ${err.message}`);
+    if (isAiConfigError(err)) return sendAiConfigError(res);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -758,6 +780,7 @@ async function runWeekGeneration(userId, weekStart) {
              existing.id]
           );
           planId = existing.id;
+          invalidateMealDetailsForPlan(planId);
         } else {
           planId = runDb(
             `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -766,6 +789,7 @@ async function runWeekGeneration(userId, weekStart) {
              dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
           );
         }
+        invalidateShoppingListsForUser(userId);
 
         console.log(`[GEN] ${key} day ${idx + 1}/7 done: ${dayName} ${dayPlan.total_calories} kcal`);
 
@@ -802,6 +826,7 @@ async function runWeekGeneration(userId, weekStart) {
 app.post('/api/generate-week-async', (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+  if (!AI_KEY) return sendAiConfigError(res);
   const accountId = req.account.id;
 
   const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
@@ -883,6 +908,7 @@ app.get('/api/generate-status/:userId', (req, res) => {
 app.post('/api/generate-week', async (req, res) => {
   const { userId, weekStart } = req.body;
   if (!userId || !weekStart) return res.status(400).json({ error: 'userId and weekStart required' });
+  if (!AI_KEY) return sendAiConfigError(res);
   const accountId = req.account.id;
 
   const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
@@ -946,6 +972,7 @@ app.post('/api/generate-week', async (req, res) => {
              existing.id]
           );
           planId = existing.id;
+          invalidateMealDetailsForPlan(planId);
         } else {
           planId = runDb(
             `INSERT INTO meal_plans (user_id, date, day_name, total_calories, total_protein, total_carbs, total_fat, meals_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -954,6 +981,7 @@ app.post('/api/generate-week', async (req, res) => {
              dayPlan.total_carbs || 0, dayPlan.total_fat || 0, mealsJson]
           );
         }
+        invalidateShoppingListsForUser(userId);
 
         const plan = planToJSON(queryOne('SELECT * FROM meal_plans WHERE id = ?', [planId]));
         safeWrite(`data: ${JSON.stringify({ type: 'day_done', day: idx, name: dayName, date, plan })}\n\n`);
@@ -993,6 +1021,7 @@ app.get('/api/chat/:userId', (req, res) => {
 app.post('/api/chat', async (req, res) => {
   const { userId, message, planDate } = req.body;
   if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
+  if (!AI_KEY) return sendAiConfigError(res);
   const accountId = req.account.id;
 
   const user = queryOne('SELECT * FROM users WHERE id = ? AND account_id = ?', [userId, accountId]);
@@ -1025,7 +1054,7 @@ Odpovídej v češtině. Pokud uživatel žádá změnu jídelníčku, navrhni k
   });
 
   try {
-    const stream = await ai.chat.completions.create({
+    const stream = await getAiClient().chat.completions.create({
       model: AI_MODEL,
       messages: [
         { role: 'system', content: systemMsg },
@@ -1182,6 +1211,7 @@ app.post('/api/meal-detail', async (req, res) => {
       cached: true,
     });
   }
+  if (!AI_KEY) return sendAiConfigError(res);
 
   // Get user for context
   const user = queryOne('SELECT * FROM users WHERE id = ?', [plan.user_id]);
@@ -1201,7 +1231,7 @@ Vrať POUZE JSON s tímto přesným formátem (žádný jiný text):
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-    const completion = await ai.chat.completions.create(
+    const completion = await getAiClient().chat.completions.create(
       {
         model: AI_MODEL,
         messages: [
@@ -1243,6 +1273,7 @@ Vrať POUZE JSON s tímto přesným formátem (žádný jiný text):
     res.json({ recipe, cookware, why, cached: false });
   } catch (err) {
     console.error(`[AI] meal-detail error: ${err.message}`);
+    if (isAiConfigError(err)) return sendAiConfigError(res);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1257,16 +1288,41 @@ app.get('*', (req, res) => {
 });
 
 // ── Start ────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+const parsedPort = process.env.PORT === undefined ? 3000 : parseInt(process.env.PORT, 10);
+const PORT = Number.isNaN(parsedPort) ? 3000 : parsedPort;
 
-async function main() {
+async function startServer(port = PORT, host = '0.0.0.0') {
   await initDb();
-  writeVersionFile();
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Jídelníček v3 running on :${PORT} (SQLite/sql.js WASM, day-by-day, parallel week)`);
+  const server = app.listen(port, host);
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
   });
+  const address = server.address();
+  const shownPort = typeof address === 'object' && address ? address.port : port;
+  console.log(`Jídelníček v3 running on :${shownPort} (SQLite/sql.js WASM, day-by-day, parallel week)`);
+  return server;
 }
 
-main().catch(err => { console.error('Startup failed:', err); process.exit(1); });
+async function main() {
+  const server = await startServer();
+  app.locals.server = server;
+}
+
+if (require.main === module) {
+  main().catch(err => { console.error('Startup failed:', err); process.exit(1); });
+}
 
 process.on('uncaughtException', err => console.error('Uncaught:', err.message));
+
+module.exports = {
+  app,
+  startServer,
+  initDb,
+  _test: {
+    queryAll,
+    queryOne,
+    runDb,
+    invalidateShoppingListsForUser,
+  },
+};

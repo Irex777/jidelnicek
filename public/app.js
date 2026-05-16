@@ -475,9 +475,8 @@ function renderDay(plan) {
   for (const [type, label] of Object.entries(MEAL_TYPES)) {
     const meal = (plan.meals || {})[type];
     if (!meal) continue;
-    const mealData = esc(JSON.stringify({ planId: plan.id, mealType: type, meal }));
     html += `
-      <div class="meal-card clickable" onclick='showMealDetail(${JSON.stringify({ planId: plan.id, mealType: type, meal }).replace(/'/g, "&#39;")})'>
+      <div class="meal-card clickable" role="button" tabindex="0" data-plan-id="${plan.id}" data-meal-type="${esc(type)}">
         <div class="meal-card-header">
           <div class="meal-type-label"><span class="dot"></span>${MEAL_ICONS[type] || ''} ${label}</div>
           <div class="meal-cal-badge">${meal.calories || 0} kcal</div>
@@ -498,6 +497,23 @@ function renderDay(plan) {
 
   html += '</div>';
   el.innerHTML = html;
+  bindMealCards(plan);
+}
+
+function bindMealCards(plan) {
+  document.querySelectorAll('.meal-card[data-meal-type]').forEach(card => {
+    const mealType = card.dataset.mealType;
+    const meal = (plan.meals || {})[mealType];
+    if (!meal) return;
+    const open = () => showMealDetail({ planId: plan.id, mealType, meal });
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open();
+      }
+    });
+  });
 }
 
 // ── Generate single day ──────────────────────────────────────────────
