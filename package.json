@@ -4,8 +4,8 @@
   "description": "AI jídelníček — day-by-day generování, SQLite, SSE",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js",
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env server.js",
     "test": "node --test"
   },
   "dependencies": {

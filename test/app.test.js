@@ -7,8 +7,7 @@ const test = require('node:test');
 process.env.NODE_ENV = 'test';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'jidelnicek-test-'));
 process.env.APP_VERSION = 'test-version';
-delete process.env.ZAI_API_KEY;
-delete process.env.OPENAI_API_KEY;
+delete process.env.AI_API_KEY;
 
 const { startServer, _test } = require('../server');
 

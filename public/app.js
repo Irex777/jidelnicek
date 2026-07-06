@@ -634,121 +634,114 @@ function updateDayTabsFromGenStatus(days) {
   });
 }
 
-// ── Generate week (background + polling) ────────────────────────────
-let weekPollTimer = null;
-let bgGenDays = null; // { date: 'done'|'generating'|'error'|'pending' } — per-day generation status from server
+// ── Shared: apply generation status to UI (header indicator + day tabs)
+function applyGenStatus(status) {
+  const hasErrors = (status.errors && status.errors.length > 0);
+  showBgGenIndicator(status.completed, status.total, status.status === 'complete', hasErrors);
+  if (status.days) updateDayTabsFromGenStatus(status.days);
 
-async function generateWeek() {
-  if (!currentUser || generating) return;
-  generating = true;
+  const genSub = document.getElementById('genSub');
+  const genFill = document.getElementById('genFill');
+  const genText = document.getElementById('genText');
+  if (genSub) genSub.textContent = `${status.completed}/${status.total} dní hotovo`;
+  if (genFill) genFill.style.width = `${(status.completed / status.total) * 100}%`;
+  if (genText && status.status === 'generating') genText.textContent = 'Generuji týden...';
+}
 
+// Shared: handle generation completion/error/timeout
+function handleGenResult(status, startTime) {
   const btnDay = document.getElementById('btnGenerateDay');
   const btnWeek = document.getElementById('btnGenerateWeek');
-  btnDay.disabled = true;
-  btnWeek.disabled = true;
+  const el = document.getElementById('content');
 
-  // Show persistent header indicator immediately
-  showBgGenIndicator(0, 7, false, false);
+  if (status.status === 'complete') {
+    const genText = document.getElementById('genText');
+    if (genText) genText.textContent = `Hotovo! ${status.completed}/${status.total} dní vygenerováno`;
+    generating = false;
+    btnDay.disabled = false;
+    btnWeek.disabled = false;
+    loadWeekPlans();
+  } else if (status.status === 'error') {
+    const errMsg = status.errors?.map(e => e.error || e).join(', ') || 'Neznámá chyba';
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(errMsg)}</p></div>`;
+    generating = false;
+    btnDay.disabled = false;
+    btnWeek.disabled = false;
+  } else if (Date.now() - startTime > 5 * 60 * 1000) {
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">⏰</div><h2>Generování stále běží</h2><p>Generování trvá déle než obvykle. Zkuste stránku obnovit později.</p></div>`;
+    generating = false;
+    btnDay.disabled = false;
+    btnWeek.disabled = false;
+  }
+}
 
+// Shared: start polling for generation progress
+function startWeekPolling(onComplete) {
+  const startTime = Date.now();
+  if (weekPollTimer) clearInterval(weekPollTimer);
+  weekPollTimer = setInterval(async () => {
+    try {
+      const res = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
+      const status = await res.json();
+      applyGenStatus(status);
+
+      if (status.status !== 'generating') {
+        clearInterval(weekPollTimer);
+        weekPollTimer = null;
+        handleGenResult(status, startTime);
+        if (status.status === 'complete' && onComplete) onComplete();
+      } else if (Date.now() - startTime > 5 * 60 * 1000) {
+        clearInterval(weekPollTimer);
+        weekPollTimer = null;
+        handleGenResult(status, startTime);
+      }
+    } catch (e) { console.error('Poll error:', e); }
+  }, 3000);
+}
+
+// Shared: disable generation buttons
+function setGenButtons(disabled) {
+  document.getElementById('btnGenerateDay').disabled = disabled;
+  document.getElementById('btnGenerateWeek').disabled = disabled;
+}
+
+// Shared: show generation progress UI
+function showGenProgress(completed, total, hint) {
   const el = document.getElementById('content');
   el.innerHTML = `<div class="gen-progress">
     <div class="gen-ring"></div>
     <div class="gen-text" id="genText">Spouštím generování týdne...</div>
-    <div class="gen-sub" id="genSub">0/7 dní hotovo</div>
-    <div class="gen-progress-bar"><div class="gen-progress-fill" id="genFill"></div></div>
-    <div class="gen-hint" style="font-size:12px;color:var(--text3);margin-top:8px">Můžete zavřít stránku — generování pokračuje na serveru</div>
+    <div class="gen-sub" id="genSub">${completed || 0}/${total || 7} dní hotovo</div>
+    <div class="gen-progress-bar"><div class="gen-progress-fill" id="genFill" style="width:${((completed || 0) / (total || 7)) * 100}%"></div></div>
+    <div class="gen-hint" style="font-size:12px;color:var(--text3);margin-top:8px">${esc(hint || 'Můžete zavřít stránku — generování pokračuje na serveru')}</div>
   </div>`;
+}
 
-  // Mark all tabs as generating initially
+async function generateWeek() {
+  if (!currentUser || generating) return;
+  generating = true;
+  setGenButtons(true);
+
+  showGenProgress(0, 7);
+
   bgGenDays = {};
-  const dates = getWeekDates();
-  dates.forEach(d => { bgGenDays[d] = 'generating'; });
+  getWeekDates().forEach(d => { bgGenDays[d] = 'generating'; });
   renderDayTabs();
 
   try {
-    // Fire and forget — server runs generation in background
     const res = await authFetch('/api/generate-week-async', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: currentUser.id, weekStart: currentWeek }),
     });
-
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Chyba spuštění generování');
+      throw new Error((await res.json()).error || 'Chyba spuštění generování');
     }
-
-    // Start polling for progress
-    const startTime = Date.now();
-    const MAX_POLL_MS = 5 * 60 * 1000; // 5 min timeout
-
-    weekPollTimer = setInterval(async () => {
-      try {
-        const statusRes = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
-        const status = await statusRes.json();
-
-        // Update persistent header indicator
-        const hasErrors = (status.errors && status.errors.length > 0);
-        showBgGenIndicator(status.completed, status.total, status.status === 'complete', hasErrors);
-
-        // Update day tabs with per-day status
-        if (status.days) {
-          updateDayTabsFromGenStatus(status.days);
-        }
-
-        const genSub = document.getElementById('genSub');
-        const genFill = document.getElementById('genFill');
-        const genText = document.getElementById('genText');
-
-        if (genSub) genSub.textContent = `${status.completed}/${status.total} dní hotovo`;
-        if (genFill) genFill.style.width = `${(status.completed / status.total) * 100}%`;
-
-        if (status.status === 'complete') {
-          clearInterval(weekPollTimer);
-          weekPollTimer = null;
-          if (genText) genText.textContent = `Hotovo! ${status.completed}/${status.total} dní vygenerováno`;
-          // Reload plans from DB and render
-          generating = false;
-          btnDay.disabled = false;
-          btnWeek.disabled = false;
-          await loadWeekPlans();
-          return;
-        }
-
-        if (status.status === 'error') {
-          clearInterval(weekPollTimer);
-          weekPollTimer = null;
-          const errMsg = status.errors?.map(e => e.error || e).join(', ') || 'Neznámá chyba';
-          el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(errMsg)}</p></div>`;
-          generating = false;
-          btnDay.disabled = false;
-          btnWeek.disabled = false;
-          return;
-        }
-
-        if (status.status === 'generating' && genText) {
-          genText.textContent = `Generuji týden...`;
-        }
-
-        // Timeout check
-        if (Date.now() - startTime > MAX_POLL_MS) {
-          clearInterval(weekPollTimer);
-          weekPollTimer = null;
-          el.innerHTML = `<div class="empty-state"><div class="empty-icon">⏰</div><h2>Generování stále běží</h2><p>Generování trvá déle než obvykle. Zkuste stránku obnovit později.</p></div>`;
-          generating = false;
-          btnDay.disabled = false;
-          btnWeek.disabled = false;
-        }
-      } catch (pollErr) {
-        console.error('Poll error:', pollErr);
-      }
-    }, 3000); // Poll every 3s
-
+    startWeekPolling();
   } catch (err) {
-    const msg = esc(err.message);
-    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${msg}</p></div>`;
-    btnDay.disabled = false;
-    btnWeek.disabled = false;
+    const el = document.getElementById('content');
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(err.message)}</p></div>`;
+    setGenButtons(false);
     generating = false;
     hideBgGenIndicator();
     bgGenDays = null;
@@ -762,79 +755,13 @@ async function checkActiveGeneration() {
   try {
     const res = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
     const status = await res.json();
-    if (status.status === 'generating') {
-      generating = true;
-      const btnDay = document.getElementById('btnGenerateDay');
-      const btnWeek = document.getElementById('btnGenerateWeek');
-      btnDay.disabled = true;
-      btnWeek.disabled = true;
+    if (status.status !== 'generating') return;
 
-      // Show persistent header indicator
-      showBgGenIndicator(status.completed, status.total, false, false);
-
-      // Update day tabs with per-day status
-      if (status.days) {
-        updateDayTabsFromGenStatus(status.days);
-      }
-
-      const el = document.getElementById('content');
-      el.innerHTML = `<div class="gen-progress">
-        <div class="gen-ring"></div>
-        <div class="gen-text" id="genText">Generuji týden...</div>
-        <div class="gen-sub" id="genSub">${status.completed}/${status.total} dní hotovo</div>
-        <div class="gen-progress-bar"><div class="gen-progress-fill" id="genFill" style="width:${(status.completed / status.total) * 100}%"></div></div>
-        <div class="gen-hint" style="font-size:12px;color:var(--text3);margin-top:8px">Generování běží na serveru — můžete zavřít stránku</div>
-      </div>`;
-
-      // Resume polling
-      const startTime = Date.now();
-      const MAX_POLL_MS = 5 * 60 * 1000;
-      weekPollTimer = setInterval(async () => {
-        try {
-          const sRes = await authFetch(`/api/generate-status/${currentUser.id}?weekStart=${currentWeek}`);
-          const s = await sRes.json();
-
-          // Update persistent header indicator
-          const hasErrors = (s.errors && s.errors.length > 0);
-          showBgGenIndicator(s.completed, s.total, s.status === 'complete', hasErrors);
-
-          // Update day tabs with per-day status
-          if (s.days) {
-            updateDayTabsFromGenStatus(s.days);
-          }
-
-          const genSub = document.getElementById('genSub');
-          const genFill = document.getElementById('genFill');
-          const genText = document.getElementById('genText');
-          if (genSub) genSub.textContent = `${s.completed}/${s.total} dní hotovo`;
-          if (genFill) genFill.style.width = `${(s.completed / s.total) * 100}%`;
-
-          if (s.status === 'complete') {
-            clearInterval(weekPollTimer);
-            weekPollTimer = null;
-            generating = false;
-            btnDay.disabled = false;
-            btnWeek.disabled = false;
-            await loadWeekPlans();
-          } else if (s.status === 'error') {
-            clearInterval(weekPollTimer);
-            weekPollTimer = null;
-            const errMsg = s.errors?.map(e => e.error || e).join(', ') || 'Neznámá chyba';
-            el.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h2>Chyba při generování</h2><p>${esc(errMsg)}</p></div>`;
-            generating = false;
-            btnDay.disabled = false;
-            btnWeek.disabled = false;
-          } else if (Date.now() - startTime > MAX_POLL_MS) {
-            clearInterval(weekPollTimer);
-            weekPollTimer = null;
-            el.innerHTML = `<div class="empty-state"><div class="empty-icon">⏰</div><h2>Generování stále běží</h2><p>Zkuste stránku obnovit později.</p></div>`;
-            generating = false;
-            btnDay.disabled = false;
-            btnWeek.disabled = false;
-          }
-        } catch (e) { console.error('Poll error:', e); }
-      }, 3000);
-    }
+    generating = true;
+    setGenButtons(true);
+    applyGenStatus(status);
+    showGenProgress(status.completed, status.total, 'Generování běží na serveru — můžete zavřít stránku');
+    startWeekPolling();
   } catch (e) { console.error('checkActiveGeneration:', e); }
 }
 
@@ -1111,19 +1038,27 @@ function esc(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ── Version polling: auto-reload when server deploys new code ────────
-(function versionPoll() {
-  let initialVersion = null;
-  setInterval(() => {
-    fetch('/version.json?' + Date.now())
-      .then(r => r.json())
-      .then(v => {
-        if (!initialVersion) { initialVersion = v.version; return; }
-        if (v.version !== initialVersion) {
-          console.log(`[VERSION] Server updated (${initialVersion} → ${v.version}), reloading...`);
-          location.reload();
-        }
-      })
-      .catch(() => {}); // silent — don't spam on network errors
-  }, 30000);
+// ── Service Worker registration ─────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(function(reg) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      location.reload();
+    });
+  }).catch(function(err) {
+    console.warn('[SW] Registration failed:', err);
+  });
+}
+
+// ── Model badge (reflects /api/health) ──────────────────────────────
+(async () => {
+  const badge = document.getElementById('model-badge');
+  if (!badge) return;
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    badge.textContent = data.ai_configured ? data.model : `${data.model} (offline)`;
+    badge.title = data.ai_configured ? 'AI připojena' : 'AI není nakonfigurována';
+  } catch (err) {
+    badge.textContent = '?';
+  }
 })();
